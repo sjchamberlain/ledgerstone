@@ -1,0 +1,10 @@
+# Belt-and-suspenders: even though config.php only holds an array (harmless
+# if ever served as plain PHP source is never returned by a working PHP
+# handler), block direct access to anything that isn't meant to be fetched
+# by a browser.
+<FilesMatch "\.(sql|md|sample\.php)$">
+  Require all denied
+</FilesMatch>
+
+# Don't let visitors browse the folder listing if index.php is ever missing.
+Options -Indexes
