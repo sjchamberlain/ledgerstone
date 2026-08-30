@@ -11,6 +11,8 @@ let DATA = {
 let CURRENT_USER = window.PM_USER || {role:'owner'};
 let CSRF_TOKEN = window.PM_CSRF || '';
 let USERS_LIST = []; // populated on demand for the Users admin tab
+let APP_VERSION = null;        // version seen on the first load this session
+let NEW_VERSION_AVAILABLE = false; // true once a poll sees a different version deployed
 
 function isAdmin(){ return CURRENT_USER && CURRENT_USER.role === 'admin'; }
 
@@ -45,6 +47,7 @@ async function loadData(){
       forcedPasswordChange = true;
       openModal('changePassword','edit');
     }
+    pm_note_version(data.appVersion);
   }catch(e){
     console.error('Load failed', e);
   }
@@ -76,6 +79,23 @@ function pm_normalize_user_row(u){
   return u;
 }
 async function refreshData(){ await loadData(); }
+
+function pm_note_version(serverVersion){
+  if(!serverVersion) return;
+  if(APP_VERSION === null){ APP_VERSION = serverVersion; return; }
+  if(serverVersion !== APP_VERSION && !NEW_VERSION_AVAILABLE){
+    NEW_VERSION_AVAILABLE = true;
+    render();
+  }
+}
+
+async function pm_poll_version(){
+  try{
+    const r = await apiCall('version', null, 'GET');
+    pm_note_version(r.version);
+  }catch(e){ /* offline or logged out — ignore, next poll will retry */ }
+}
+setInterval(pm_poll_version, 5 * 60 * 1000);
 
 async function apiSave(entity, record){ return apiCall('save', {entity, record}); }
 async function apiDelete(entity, id){ return apiCall('delete', {entity, id}); }
@@ -211,7 +231,16 @@ function setTab(t){
    ========================================================= */
 function render(){
   const app = document.getElementById('app');
-  app.innerHTML = renderSidebar() + '<div class="main">' + renderTab() + '</div>' + renderModal() + renderConfirm();
+  app.classList.toggle('has-reload-bar', NEW_VERSION_AVAILABLE);
+  app.innerHTML = renderReloadBar() + renderSidebar() + '<div class="main">' + renderTab() + '</div>' + renderModal() + renderConfirm();
+}
+
+function renderReloadBar(){
+  if(!NEW_VERSION_AVAILABLE) return '';
+  return `<div class="reload-bar">
+    <span>A new version of Ledgerstone has been deployed.</span>
+    <button class="btn btn-sm" onclick="location.reload()">Reload now</button>
+  </div>`;
 }
 
 function renderSidebar(){

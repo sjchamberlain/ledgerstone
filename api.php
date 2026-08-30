@@ -15,6 +15,11 @@ try {
     exit;
   }
 
+  if ($method === 'GET' && $action === 'version') {
+    echo json_encode(['version' => pm_app_version()]);
+    exit;
+  }
+
   if ($method === 'GET' && $action === 'getUsers') {
     pm_require_admin();
     $stmt = $pdo->query('SELECT id, username, role, owner_id, display_name, email FROM users ORDER BY username');
@@ -93,6 +98,22 @@ try {
 }
 
 /* =========================================================
+   DEPLOYED VERSION — lets the frontend notice a new deploy and prompt a
+   reload, since tabs left open across a cPanel Git deploy would otherwise
+   silently keep running the old app.js against the new api.php.
+   Derived from file mtimes rather than a hand-maintained version number,
+   so it updates itself on every deploy with nothing to remember to bump.
+   ========================================================= */
+function pm_app_version(): string {
+  $files = [__DIR__ . '/assets/app.js', __DIR__ . '/api.php', __DIR__ . '/index.php'];
+  $latest = 0;
+  foreach ($files as $f) {
+    $latest = max($latest, @filemtime($f) ?: 0);
+  }
+  return (string)$latest;
+}
+
+/* =========================================================
    READ: full dataset, scoped by role
    ========================================================= */
 function pm_get_all(PDO $pdo, array $user): array {
@@ -143,6 +164,7 @@ function pm_get_all(PDO $pdo, array $user): array {
       'displayName' => $user['display_name'], 'ownerId' => $user['owner_id'],
       'mustChangePassword' => !empty($user['must_change_password']),
     ],
+    'appVersion' => pm_app_version(),
     'csrfToken' => pm_csrf_token(),
     'buildings' => $buildings,
     'units' => $unitRows,

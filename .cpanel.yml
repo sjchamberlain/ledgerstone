@@ -1,0 +1,11 @@
+---
+deployment:
+  tasks:
+    # EDIT DEPLOYPATH before using this: it must be the document root of
+    # the subdomain/subfolder you're serving Ledgerstone from. Find it under
+    # cPanel > Domains (or Subdomains) — e.g.
+    #   /home/cpaneluser/public_html/pm
+    #   /home/cpaneluser/pm.yourdomain.com
+    - export DEPLOYPATH=/home/CPANELUSER/public_html/pm/
+    - /bin/mkdir -p $DEPLOYPATH
+    - /bin/cp -R * .htaccess $DEPLOYPATH
