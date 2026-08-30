@@ -12,11 +12,16 @@ $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $username = trim($_POST['username'] ?? '');
   $password = (string)($_POST['password'] ?? '');
-  if ($username !== '' && $password !== '' && pm_attempt_login($username, $password)) {
-    header('Location: index.php');
-    exit;
+  if ($username !== '' && $password !== '') {
+    $result = pm_attempt_login($username, $password);
+    if ($result['ok']) {
+      header('Location: index.php');
+      exit;
+    }
+    $error = $result['error'] ?? 'Incorrect username or password.';
+  } else {
+    $error = 'Incorrect username or password.';
   }
-  $error = 'Incorrect username or password.';
 }
 ?>
 <!DOCTYPE html>

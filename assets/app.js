@@ -41,6 +41,10 @@ async function loadData(){
     if(currentTab==='reports' && !isAdmin() && !ownerReportState.ownerId){
       ownerReportState.ownerId = String(CURRENT_USER.ownerId||'');
     }
+    if(CURRENT_USER.mustChangePassword){
+      forcedPasswordChange = true;
+      openModal('changePassword','edit');
+    }
   }catch(e){
     console.error('Load failed', e);
   }
@@ -170,6 +174,7 @@ function isDateInRange(d, start, end){
    APP / NAV STATE
    ========================================================= */
 let currentTab = 'dashboard';
+let forcedPasswordChange = false; // true = must-change-password modal, can't be dismissed
 let modal = null;   // {type:'building'|'unit'|..., mode:'add'|'edit'}
 let draft = null;   // working copy of entity being edited in modal
 let confirmState = null; // {message, onYes: fn}
@@ -1043,7 +1048,7 @@ function openModal(type, mode, id, extra){
   }
   render();
 }
-function closeModal(){ modal=null; draft=null; render(); }
+function closeModal(){ if(forcedPasswordChange && modal && modal.type==='changePassword') return; modal=null; draft=null; render(); }
 function updateDraft(field, value){ draft[field]=value; }
 function updateDraftNum(field, value){ draft[field]=Number(value); }
 
@@ -1061,7 +1066,13 @@ async function saveModal(){
     if(draft.new !== draft.confirm){ alertMsg('New password and confirmation don\'t match.'); return; }
     try{
       const result = await apiCall('changePassword', {current: draft.current, new: draft.new});
-      if(result.ok){ closeModal(); alertMsg(result.message||'Password updated.'); }
+      if(result.ok){
+        const wasForced = forcedPasswordChange;
+        forcedPasswordChange = false;
+        CURRENT_USER.mustChangePassword = false;
+        closeModal();
+        alertMsg(wasForced ? 'Password updated — you\'re all set.' : (result.message||'Password updated.'));
+      }
       else { alertMsg(result.message || 'Could not change password.'); }
     }catch(e){ alertMsg('Could not change password: '+e.message); }
     return;
@@ -1103,13 +1114,15 @@ function renderModal(){
     case 'user': title = modal.mode==='add'?'Add User':'Edit User'; body = userForm(); break;
     case 'changePassword': title = 'Change Password'; body = changePasswordForm(); break;
   }
-  return `<div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+  const forced = forcedPasswordChange && modal.type==='changePassword';
+  return `<div class="modal-overlay" ${forced?'':'onclick="if(event.target===this)closeModal()"'}>
     <div class="modal-box">
-      <span class="close-x" onclick="closeModal()">&times;</span>
+      ${forced?'':'<span class="close-x" onclick="closeModal()">&times;</span>'}
       <h3>${title}</h3>
+      ${forced?'<div class="subtle" style="margin-bottom:14px;">Set a new password before continuing — this account is still using its initial one-time password.</div>':''}
       ${body}
       <div class="modal-actions">
-        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        ${forced?'':'<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>'}
         <button class="btn" onclick="saveModal()">Save</button>
       </div>
     </div>

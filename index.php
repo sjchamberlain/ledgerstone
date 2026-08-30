@@ -22,7 +22,7 @@ if (!$user) {
 <div id="app"><div style="padding:40px;font-family:sans-serif;color:#5A6B7D;">Loading…</div></div>
 <script>
   window.PM_CSRF = <?= json_encode(pm_csrf_token()) ?>;
-  window.PM_USER = <?= json_encode(['id'=>$user['id'],'username'=>$user['username'],'role'=>$user['role'],'displayName'=>$user['display_name'],'ownerId'=>$user['owner_id']]) ?>;
+  window.PM_USER = <?= json_encode(['id'=>$user['id'],'username'=>$user['username'],'role'=>$user['role'],'displayName'=>$user['display_name'],'ownerId'=>$user['owner_id'],'mustChangePassword'=>!empty($user['must_change_password'])]) ?>;
 </script>
 <script src="assets/app.js"></script>
 </body>

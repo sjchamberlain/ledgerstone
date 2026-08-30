@@ -132,12 +132,16 @@ CREATE TABLE users (
   owner_id INT NULL,               -- set only when role = 'owner'; links the login to an owners row
   display_name VARCHAR(150),
   email VARCHAR(150),
+  failed_attempts INT NOT NULL DEFAULT 0,
+  locked_until DATETIME NULL,      -- login/password-change lockout; NULL = not locked
+  must_change_password TINYINT(1) NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- Seed one admin account so you can log in the first time.
 -- Username: admin   Password: changeme123
--- CHANGE THIS PASSWORD after your first login (see README).
-INSERT INTO users (username, password_hash, role, display_name)
-VALUES ('admin', '$2y$10$Btj9rhTnC5TVe52xAHgVg.N12jKNxDtIPMH84/76AVHgKDAYx6Zby', 'admin', 'Admin');
+-- must_change_password forces a new password to be set before the app is
+-- usable, so this default credential can't linger unnoticed.
+INSERT INTO users (username, password_hash, role, display_name, must_change_password)
+VALUES ('admin', '$2y$10$Btj9rhTnC5TVe52xAHgVg.N12jKNxDtIPMH84/76AVHgKDAYx6Zby', 'admin', 'Admin', 1);

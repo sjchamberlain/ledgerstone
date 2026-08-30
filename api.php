@@ -74,7 +74,7 @@ try {
     if ($action === 'deleteUser') {
       pm_require_admin();
       $id = (int)($body['id'] ?? 0);
-      if ($id === $user['id']) { throw new Exception("You can't delete your own account while logged in as it."); }
+      if ($id === $user['id']) { throw new PmUserError("You can't delete your own account while logged in as it."); }
       $pdo->prepare('DELETE FROM users WHERE id = ?')->execute([$id]);
       echo json_encode(['ok' => true]);
       exit;
@@ -83,9 +83,13 @@ try {
 
   http_response_code(400);
   echo json_encode(['error' => 'Unknown action']);
-} catch (Throwable $e) {
+} catch (PmUserError $e) {
   http_response_code(400);
   echo json_encode(['error' => $e->getMessage()]);
+} catch (Throwable $e) {
+  error_log('[Ledgerstone api.php] ' . $e->getMessage());
+  http_response_code(500);
+  echo json_encode(['error' => 'An unexpected error occurred. Please try again or contact support.']);
 }
 
 /* =========================================================
@@ -137,6 +141,7 @@ function pm_get_all(PDO $pdo, array $user): array {
     'currentUser' => [
       'id' => $user['id'], 'username' => $user['username'], 'role' => $user['role'],
       'displayName' => $user['display_name'], 'ownerId' => $user['owner_id'],
+      'mustChangePassword' => !empty($user['must_change_password']),
     ],
     'csrfToken' => pm_csrf_token(),
     'buildings' => $buildings,
@@ -449,7 +454,7 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
       return $id;
     }
     default:
-      throw new Exception("Unknown entity: $entity");
+      throw new PmUserError("Unknown entity: $entity");
   }
 }
 
@@ -459,7 +464,7 @@ function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
     'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
     'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
   ][$entity] ?? null;
-  if (!$table) throw new Exception("Unknown entity: $entity");
+  if (!$table) throw new PmUserError("Unknown entity: $entity");
   $pdo->prepare("DELETE FROM $table WHERE id = ?")->execute([$id]);
 }
 
@@ -470,7 +475,7 @@ function pm_generate_fee(PDO $pdo, int $buildingId, string $month): array {
   $stmt = $pdo->prepare('SELECT * FROM buildings WHERE id = ?');
   $stmt->execute([$buildingId]);
   $b = $stmt->fetch();
-  if (!$b) throw new Exception('Building not found');
+  if (!$b) throw new PmUserError("Building not found");
 
   $monthStart = $month . '-01';
   $monthEnd = date('Y-m-t', strtotime($monthStart));
@@ -522,14 +527,23 @@ function pm_generate_fee(PDO $pdo, int $buildingId, string $month): array {
    ========================================================= */
 function pm_change_password(PDO $pdo, array $user, string $current, string $new): array {
   if (strlen($new) < 8) return ['ok' => false, 'message' => 'New password must be at least 8 characters.'];
-  $stmt = $pdo->prepare('SELECT password_hash FROM users WHERE id = ?');
+  $stmt = $pdo->prepare('SELECT password_hash, failed_attempts, locked_until FROM users WHERE id = ?');
   $stmt->execute([$user['id']]);
   $row = $stmt->fetch();
-  if (!$row || !password_verify($current, $row['password_hash'])) {
+  if (!$row) return ['ok' => false, 'message' => 'Current password is incorrect.'];
+
+  if ($row['locked_until'] !== null && strtotime($row['locked_until']) > time()) {
+    return ['ok' => false, 'message' => 'Too many failed attempts. Try again in a few minutes.'];
+  }
+
+  if (!password_verify($current, $row['password_hash'])) {
+    pm_register_login_failure($pdo, (int)$user['id'], (int)$row['failed_attempts']);
     return ['ok' => false, 'message' => 'Current password is incorrect.'];
   }
-  $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+
+  $pdo->prepare('UPDATE users SET password_hash = ?, failed_attempts = 0, locked_until = NULL, must_change_password = 0 WHERE id = ?')
     ->execute([password_hash($new, PASSWORD_DEFAULT), $user['id']]);
+  $_SESSION['user']['must_change_password'] = false;
   return ['ok' => true, 'message' => 'Password updated.'];
 }
 

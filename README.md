@@ -29,9 +29,9 @@ In cPanel:
    - Username: `admin`
    - Password: `changeme123`
 
-   **Change this password the moment you've confirmed you can log in** —
-   there's a "Change password" link in the sidebar once you're inside the
-   app, or use the Users tab.
+   This account is flagged to force a password change — the app opens
+   straight into the "Change Password" dialog on first login and won't
+   let you dismiss it until you set a real password.
 
 ## 3. Upload the files
 
@@ -105,6 +105,17 @@ Everything here is plain PHP and vanilla JS — no framework, no build
 tool. If you want to keep developing it (new report types, CSV export,
 etc.), any general-purpose coding tool can pick this up directly from
 these files; there's no hidden state or generated code to reconstruct.
+
+## Login security
+
+- After 5 failed login attempts on an account, it's locked for 15 minutes
+  (tracked in `users.failed_attempts` / `users.locked_until`). This also
+  applies to repeated wrong "current password" guesses on the change-password
+  form. Wait it out, or clear it early from phpMyAdmin — `users` table, set
+  that row's `failed_attempts` to `0` and `locked_until` to `NULL`.
+- Set `HTTPS` up on the subdomain before real use — the session cookie
+  automatically gets the `Secure` flag once the app detects it's being
+  served over `https://`, but only then.
 
 ## Locked out?
 
