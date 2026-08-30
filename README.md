@@ -87,8 +87,35 @@ Visit your subdomain. You should land on a login page. Log in with
   hits.
 - `api.php` — the one backend endpoint the frontend talks to. Every
   write action re-checks the logged-in user's role server-side.
+- `lib_rent.php` — the rent-due charge logic, shared by `api.php` (for the
+  admin's manual "Run rent-due check now" button) and `cron_rent_due.php`.
+- `cron_rent_due.php` — run daily by cPanel's Cron Jobs (see below); creates
+  the month's rent charge for any active lease whose billing day is today.
 - `assets/app.js`, `assets/style.css` — the whole frontend. One file
   each, no build step, no framework.
+
+## Automatic rent due
+
+Rent is charged to a lease's ledger automatically on its billing day each
+month — no manual "Add Charge" needed for the regular monthly rent charge.
+This runs via a cPanel cron job, not by anyone having the app open:
+
+1. cPanel → **Cron Jobs**.
+2. Common Settings → **Once Per Day** (e.g. 1:00 AM), or set your own schedule.
+3. Command:
+   ```
+   php /home/CPANELUSER/public_html/pm/cron_rent_due.php
+   ```
+   (adjust the path to wherever you uploaded the app — same folder as
+   `index.php`). Use the full PHP binary path cPanel suggests if your
+   host requires it (often `/usr/local/bin/php` or similar — cPanel's
+   Cron Jobs page shows the right one).
+4. It's safe to run more than once a day (a lease already charged for
+   today is skipped), and it does nothing outside the CLI — it can't be
+   triggered by visiting a URL.
+5. Admins can also trigger it on demand from the **Ledger** tab ("Run
+   rent-due check now") — handy right after adding a new lease with a
+   billing day earlier than today, so it doesn't wait for tomorrow's cron.
 
 ## Backups
 

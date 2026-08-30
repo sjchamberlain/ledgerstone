@@ -202,17 +202,17 @@ let ledgerSelectedLease = null;
 let filters = { maintBuilding:'', ownerBillBuilding:'', commOwner:'', commBuilding:'', tcommTenant:'', tcommBuilding:'', commContactType:'' };
 let viewingOwnerId = null;
 let viewingTenantId = null;
+let peopleSubTab = 'owners'; // 'owners' | 'tenants' — sub-view within the merged People tab
 let ownerReportState = { ownerId:'', start:'', end:'' , building:''};
 let arrearsReportState = { asOf: todayISO(), building:'' };
 let feeGenState = { buildingId:'', month: new Date().toISOString().slice(0,7) };
 
 const NAV_BASE = [
   {id:'dashboard', label:'Dashboard'},
-  {id:'properties', label:'Buildings & Units'},
-  {id:'owners', label:'Owners'},
-  {id:'tenants', label:'Tenants'},
+  {id:'properties', label:'Properties'},
+  {id:'people', label:'People'},
   {id:'leases', label:'Leases'},
-  {id:'ledger', label:'Tenant Ledger'},
+  {id:'ledger', label:'Ledger'},
   {id:'maintenance', label:'Maintenance'},
   {id:'billing', label:'Owner Billing'},
   {id:'communications', label:'Communications'},
@@ -266,8 +266,7 @@ function renderTab(){
   switch(currentTab){
     case 'dashboard': return renderDashboard();
     case 'properties': return renderProperties();
-    case 'owners': return renderOwners();
-    case 'tenants': return renderTenants();
+    case 'people': return renderPeople();
     case 'leases': return renderLeases();
     case 'ledger': return renderLedger();
     case 'maintenance': return renderMaintenance();
@@ -384,11 +383,28 @@ function renderProperties(){
 
   return `
   <div class="page-head">
-    <div><h1 class="page-title">Buildings &amp; Units</h1><div class="page-sub">Your portfolio, unit by unit</div></div>
+    <div><h1 class="page-title">Properties</h1><div class="page-sub">Your portfolio, unit by unit</div></div>
     <button class="btn admin-only" onclick="openModal('building','add')">+ Add Building</button>
   </div>
   ${blocks || '<div class="panel"><div class="empty">No buildings yet. Add your first one to get started.</div></div>'}
   `;
+}
+
+/* =========================================================
+   PEOPLE (Owners + Tenants)
+   ========================================================= */
+function setPeopleSubTab(sub){
+  peopleSubTab = sub;
+  viewingOwnerId = null;
+  viewingTenantId = null;
+  render();
+}
+function renderPeople(){
+  const switcher = `<div class="row" style="margin-bottom:16px;">
+    <button class="btn ${peopleSubTab==='owners'?'':'btn-ghost'} btn-sm" onclick="setPeopleSubTab('owners')">Owners</button>
+    <button class="btn ${peopleSubTab==='tenants'?'':'btn-ghost'} btn-sm" onclick="setPeopleSubTab('tenants')">Tenants</button>
+  </div>`;
+  return switcher + (peopleSubTab==='tenants' ? renderTenants() : renderOwners());
 }
 
 /* =========================================================
@@ -651,7 +667,11 @@ function renderLedger(){
   }
   return `
   <div class="page-head">
-    <div><h1 class="page-title">Tenant Ledger</h1><div class="page-sub">Charges, payments, and running balance per lease</div></div>
+    <div><h1 class="page-title">Ledger</h1><div class="page-sub">Charges, payments, and running balance per lease</div></div>
+    <button class="btn btn-ghost btn-sm admin-only" onclick="runRentDueCheck()">Run rent-due check now</button>
+  </div>
+  <div class="panel admin-only" style="padding:10px 16px;">
+    <div class="subtle">Rent charges are created automatically each day for any active lease whose billing day is today (set up via cron — see README). Use the button above to run that check on demand, e.g. right after adding a new lease.</div>
   </div>
   <div class="panel">
     <div class="field" style="max-width:420px;">
@@ -660,6 +680,14 @@ function renderLedger(){
     </div>
     ${body}
   </div>`;
+}
+
+async function runRentDueCheck(){
+  try{
+    const result = await apiCall('generateRentDue', {});
+    if(result.ok){ await refreshData(); }
+    alertMsg(result.message || 'Done.');
+  }catch(e){ alertMsg('Could not run rent-due check: '+e.message); }
 }
 
 /* =========================================================

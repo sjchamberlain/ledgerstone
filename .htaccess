@@ -6,5 +6,12 @@
   Require all denied
 </FilesMatch>
 
+# cron_rent_due.php already refuses to run outside the PHP CLI, but deny it
+# at the web server too — it needs no login, so it's not something a browser
+# should ever be able to reach.
+<Files "cron_rent_due.php">
+  Require all denied
+</Files>
+
 # Don't let visitors browse the folder listing if index.php is ever missing.
 Options -Indexes

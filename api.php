@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/lib_rent.php';
 
 header('Content-Type: application/json');
 $user = pm_require_login();
@@ -58,6 +59,19 @@ try {
       pm_require_admin();
       $result = pm_generate_fee($pdo, (int)$body['buildingId'], (string)$body['month']);
       echo json_encode($result);
+      exit;
+    }
+
+    if ($action === 'generateRentDue') {
+      pm_require_admin();
+      $createdLeaseIds = pm_generate_due_rent($pdo);
+      $count = count($createdLeaseIds);
+      echo json_encode([
+        'ok' => true,
+        'message' => $count
+          ? "Created {$count} rent charge(s) for today."
+          : 'No leases are due today (or today\'s rent charge already exists).',
+      ]);
       exit;
     }
 
