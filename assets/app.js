@@ -145,6 +145,15 @@ function esc(s){
   return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Lets a non-native clickable element (e.g. a role="tab" div) respond to
+// Enter/Space like a real button, for keyboard and screen-reader users.
+function onActivateKey(event, fn){
+  if(event.key==='Enter' || event.key===' '){
+    event.preventDefault();
+    fn();
+  }
+}
+
 function leaseLedgerEntries(leaseId){
   return DATA.ledger.filter(e=>e.leaseId===leaseId).sort((a,b)=>a.date<b.date?-1:1);
 }
@@ -246,7 +255,7 @@ function renderReloadBar(){
 function renderSidebar(){
   const nav = currentNav();
   let items = nav.map((n,i)=>`
-    <div class="nav-item ${currentTab===n.id?'active':''}" onclick="setTab('${n.id}')">
+    <div class="nav-item ${currentTab===n.id?'active':''}" role="tab" tabindex="0" aria-selected="${currentTab===n.id}" onclick="setTab('${n.id}')" onkeydown="onActivateKey(event,()=>setTab('${n.id}'))">
       <span class="nav-num">${String(i+1).padStart(2,'0')}</span><span>${n.label}</span>
     </div>`).join('');
   return `<div class="sidebar">
@@ -473,7 +482,7 @@ function renderOwnerDetail(id){
     </div>
   </div>
 
-  <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);">
+  <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Buildings owned</div><div class="kpi-value">${stakes.length}</div></div>
     <div class="kpi"><div class="kpi-label">Balance owed to you</div><div class="kpi-value ${balance>0.5?'bad':''}">${money(balance)}</div></div>
     <div class="kpi"><div class="kpi-label">Contacts logged</div><div class="kpi-value">${comms.length}</div></div>
@@ -564,7 +573,7 @@ function renderTenantDetail(id){
     </div>
   </div>
 
-  <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr);">
+  <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Leases</div><div class="kpi-value">${leases.length}</div></div>
     <div class="kpi"><div class="kpi-label">Current balance</div><div class="kpi-value ${totalBalance>0.5?'bad':''}">${money(totalBalance)}</div></div>
     <div class="kpi"><div class="kpi-label">Open maintenance</div><div class="kpi-value">${maint.filter(m=>m.status!=='completed').length}</div></div>
@@ -986,7 +995,7 @@ function renderArrearsReport(){
       <button class="btn btn-ghost" onclick="render()">Run</button>
       <button class="btn-ghost btn no-print" onclick="window.print()">Print</button>
     </div>
-    <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px;">
+    <div class="kpi-grid" style="margin-bottom:16px;">
       <div class="kpi"><div class="kpi-label">0–30 days</div><div class="kpi-value">${money(buckets['0-30'])}</div></div>
       <div class="kpi"><div class="kpi-label">31–60 days</div><div class="kpi-value">${money(buckets['31-60'])}</div></div>
       <div class="kpi"><div class="kpi-label">61–90 days</div><div class="kpi-value">${money(buckets['61-90'])}</div></div>

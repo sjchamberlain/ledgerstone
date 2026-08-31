@@ -3,6 +3,9 @@
     --ink-soft:#3D4E63;
     --paper:#F4F6F8;
     --panel:#FFFFFF;
+    --panel-alt:#EEF2F6;   /* subtly-raised sections within a panel, e.g. building-block headers */
+    --surface-2:#EAEDF1;   /* neutral tag/chip backgrounds */
+    --surface-soft:#FBFCFD; /* form input backgrounds */
     --line:#DCE2E8;
     --accent:#2F6690;
     --accent-dark:#1F4E70;
@@ -52,14 +55,14 @@
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
 
   /* ---- Cards / KPIs ---- */
-  .kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:24px;}
+  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:24px;}
   .kpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 16px;}
   .kpi-label{font-size:11.5px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-soft);margin-bottom:6px;}
   .kpi-value{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--ink);}
   .kpi-value.bad{color:var(--bad);}
   .kpi-value.good{color:var(--good);}
 
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:20px;}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:20px;overflow-x:auto;}
   .panel h3{margin:0 0 12px;font-size:15px;font-weight:600;}
   .empty{color:var(--ink-soft);font-size:13px;padding:18px 0;text-align:center;}
 
@@ -73,13 +76,13 @@
   .tag-good{background:var(--good-bg);color:var(--good);}
   .tag-warn{background:var(--warn-bg);color:var(--warn);}
   .tag-bad{background:var(--bad-bg);color:var(--bad);}
-  .tag-neutral{background:#EAEDF1;color:var(--ink-soft);}
+  .tag-neutral{background:var(--surface-2);color:var(--ink-soft);}
   .subtle{color:var(--ink-soft);font-size:12px;}
   .building-block{border:1px solid var(--line);border-radius:8px;margin-bottom:14px;overflow:hidden;}
-  .building-head{background:#EEF2F6;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;}
+  .building-head{background:var(--panel-alt);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;}
   .building-head h4{margin:0;font-size:14.5px;}
   .building-head .addr{font-size:12px;color:var(--ink-soft);margin-top:2px;}
-  .unit-table-wrap{padding:6px 16px 14px;}
+  .unit-table-wrap{padding:6px 16px 14px;overflow-x:auto;}
 
   /* ---- Forms / Modal ---- */
   .modal-overlay{position:fixed;inset:0;background:rgba(20,28,38,0.55);display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto;z-index:50;}
@@ -88,9 +91,9 @@
   .modal-box .modal-sub{color:var(--ink-soft);font-size:12.5px;margin-bottom:16px;}
   .field{margin-bottom:13px;}
   .field label{display:block;font-size:12px;font-weight:600;color:var(--ink-soft);margin-bottom:4px;text-transform:uppercase;letter-spacing:.03em;}
-  .field input, .field select, .field textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:5px;font-family:var(--sans);font-size:13.5px;background:#fbfcfd;}
+  .field input, .field select, .field textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:5px;font-family:var(--sans);font-size:13.5px;background:var(--surface-soft);}
   .field textarea{resize:vertical;min-height:60px;}
-  .field-row{display:flex;gap:10px;}
+  .field-row{display:flex;gap:10px;flex-wrap:wrap;}
   .field-row .field{flex:1;}
   .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
   .owner-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
@@ -104,9 +107,8 @@
   .filter-bar{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center;}
   .filter-bar select, .filter-bar input{padding:7px 9px;border:1px solid var(--line);border-radius:5px;font-size:13px;font-family:var(--sans);background:#fff;}
   .balance-pos{color:var(--bad);font-weight:600;}
-  .balance-zero{color:var(--good-soft, var(--good));}
   .section-divider{margin:22px 0 14px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);border-bottom:1px solid var(--line);padding-bottom:6px;}
-  .report-total-row td{font-weight:700;border-top:2px solid var(--ink);background:#F7F9FA;}
+  .report-total-row td{font-weight:700;border-top:2px solid var(--ink);background:var(--panel-alt);}
   @media print{
     .sidebar,.page-head .row,.filter-bar,.no-print{display:none !important;}
     .main{padding:0;}
@@ -117,3 +119,33 @@
 /* Admin-only controls are hidden client-side for owner logins as a UX courtesy —
    the actual permission boundary is enforced server-side in api.php regardless. */
 body.role-owner .admin-only{ display:none !important; }
+
+/* ---- Focus states (keyboard navigation) ----
+   Only rules for elements that are actually focusable: real <button>s
+   (.btn) and .nav-item, which now carries tabindex="0" + a keydown
+   handler in app.js. .mini-link/.close-x are still plain onclick spans
+   with no keyboard path — not attempting that broader rewrite here. */
+.btn:focus-visible,
+.nav-item:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible,
+.filter-bar input:focus-visible, .filter-bar select:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:1px;
+  border-color:var(--accent);
+}
+
+/* ---- Responsive: collapse the sidebar into a horizontal top bar ---- */
+@media (max-width:760px){
+  #app{flex-direction:column;}
+  .sidebar{width:100%;}
+  .brand{padding:14px 16px 10px;}
+  .nav{flex:none;display:flex;overflow-x:auto;padding:4px 10px 8px;}
+  .nav-item{white-space:nowrap;border-left:none;border-bottom:3px solid transparent;border-radius:6px 6px 0 0;}
+  .nav-item.active{border-left-color:transparent;border-bottom-color:var(--accent);}
+  .sidebar-foot{display:flex;gap:14px;flex-wrap:wrap;}
+  .main{max-height:none;padding:18px 16px;}
+  .modal-overlay{padding:20px 12px;}
+}
