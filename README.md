@@ -104,11 +104,10 @@ This runs via a cPanel cron job, not by anyone having the app open:
 2. Common Settings → **Once Per Day** (e.g. 1:00 AM), or set your own schedule.
 3. Command:
    ```
-   php /home/CPANELUSER/public_html/pm/cron_rent_due.php
+   php /home/murphserv/public_html/PROJECT-ledgerstone/cron_rent_due.php
    ```
-   (adjust the path to wherever you uploaded the app — same folder as
-   `index.php`). Use the full PHP binary path cPanel suggests if your
-   host requires it (often `/usr/local/bin/php` or similar — cPanel's
+   Use the full PHP binary path cPanel suggests if your host requires it
+   instead of just `php` (often `/usr/local/bin/php` or similar — cPanel's
    Cron Jobs page shows the right one).
 4. It's safe to run more than once a day (a lease already charged for
    today is skipped), and it does nothing outside the CLI — it can't be

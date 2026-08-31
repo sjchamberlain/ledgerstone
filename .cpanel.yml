@@ -1,11 +1,14 @@
 ---
 deployment:
   tasks:
-    # EDIT DEPLOYPATH before using this: it must be the document root of
-    # the subdomain/subfolder you're serving Ledgerstone from. Find it under
-    # cPanel > Domains (or Subdomains) — e.g.
-    #   /home/cpaneluser/public_html/pm
-    #   /home/cpaneluser/pm.yourdomain.com
-    - export DEPLOYPATH=/home/CPANELUSER/public_html/pm/
+    # DEPLOYPATH is the document root Ledgerstone is served from.
+    - export DEPLOYPATH=/home/murphserv/public_html/PROJECT-ledgerstone/
     - /bin/mkdir -p $DEPLOYPATH
-    - /bin/cp -R * .htaccess $DEPLOYPATH
+    # Skip the copy when the git checkout IS the document root (repository
+    # path set directly under public_html) — copying a directory onto
+    # itself makes `cp` exit non-zero and cPanel would report a failed
+    # deploy even though there's nothing to do.
+    - |
+      if [ "$(pwd -P)" != "$(cd "$DEPLOYPATH" && pwd -P)" ]; then
+        /bin/cp -R * .htaccess $DEPLOYPATH
+      fi
