@@ -23,11 +23,12 @@ try {
 
   if ($method === 'GET' && $action === 'getUsers') {
     pm_require_admin();
-    $stmt = $pdo->query('SELECT id, username, role, owner_id, display_name, email FROM users ORDER BY username');
+    $stmt = $pdo->query('SELECT id, username, role, owner_id, display_name, email, hourly_rate FROM users ORDER BY username');
     $rows = array_map(fn($r) => [
       'id' => (int)$r['id'], 'username' => $r['username'], 'role' => $r['role'],
       'ownerId' => $r['owner_id'] !== null ? (int)$r['owner_id'] : null,
       'displayName' => $r['display_name'], 'email' => $r['email'],
+      'hourlyRate' => $r['hourly_rate'] !== null ? (float)$r['hourly_rate'] : null,
     ], $stmt->fetchAll());
     echo json_encode(['users' => $rows]);
     exit;
@@ -133,6 +134,11 @@ function pm_app_version(): string {
 function pm_get_all(PDO $pdo, array $user): array {
   $isAdmin = $user['role'] === 'admin';
 
+  $rateStmt = $pdo->prepare('SELECT hourly_rate FROM users WHERE id = ?');
+  $rateStmt->execute([$user['id']]);
+  $hourlyRate = $rateStmt->fetchColumn();
+  $hourlyRate = $hourlyRate !== false && $hourlyRate !== null ? (float)$hourlyRate : null;
+
   if ($isAdmin) {
     $buildingIds = null; // null = no filter
   } else {
@@ -172,11 +178,16 @@ function pm_get_all(PDO $pdo, array $user): array {
     $tenantCommRows = pm_fetch_tenant_communications($pdo, $leaseIdList ?: [0]);
   }
 
+  $applianceRows = pm_fetch_appliances($pdo, $unitIdList);
+  // Time entries record internal labor cost — admin/staff only, not shown to owner logins.
+  $timeEntryRows = $isAdmin ? pm_fetch_time_entries($pdo, null) : [];
+
   return [
     'currentUser' => [
       'id' => $user['id'], 'username' => $user['username'], 'role' => $user['role'],
       'displayName' => $user['display_name'], 'ownerId' => $user['owner_id'],
       'mustChangePassword' => !empty($user['must_change_password']),
+      'hourlyRate' => $hourlyRate,
     ],
     'appVersion' => pm_app_version(),
     'csrfToken' => pm_csrf_token(),
@@ -190,6 +201,8 @@ function pm_get_all(PDO $pdo, array $user): array {
     'ownerLedger' => $ownerLedgerRows,
     'communications' => $commRows,
     'tenantCommunications' => $tenantCommRows,
+    'appliances' => $applianceRows,
+    'timeEntries' => $timeEntryRows,
   ];
 }
 
@@ -218,6 +231,9 @@ function pm_fetch_buildings(PDO $pdo, ?array $buildingIds): array {
     $out[] = [
       'id' => (int)$r['id'], 'name' => $r['name'], 'address' => $r['address'],
       'feeType' => $r['fee_type'], 'feeValue' => (float)$r['fee_value'], 'owners' => $owners,
+      'roofLastServiced' => $r['roof_last_serviced'], 'roofNotes' => $r['roof_notes'],
+      'electricalLoad' => $r['electrical_load'], 'exteriorPaintColor' => $r['exterior_paint_color'],
+      'profileNotes' => $r['profile_notes'],
     ];
   }
   return $out;
@@ -235,7 +251,36 @@ function pm_fetch_units(PDO $pdo, array $buildingIds, bool $isAdmin): array {
   return array_map(fn($r) => [
     'id' => (int)$r['id'], 'buildingId' => (int)$r['building_id'], 'number' => $r['number'],
     'beds' => (float)$r['beds'], 'baths' => (float)$r['baths'], 'sqft' => $r['sqft'] !== null ? (int)$r['sqft'] : null,
+    'notes' => $r['notes'], 'wallColor' => $r['wall_color'], 'faceplateColor' => $r['faceplate_color'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_appliances(PDO $pdo, array $unitIds): array {
+  $sql = 'SELECT * FROM appliances WHERE unit_id IN (' . pm_in_clause($unitIds) . ')';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($unitIds ?: [0]);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'unitId' => (int)$r['unit_id'], 'type' => $r['type'], 'make' => $r['make'],
+    'model' => $r['model'], 'serialNumber' => $r['serial_number'], 'installDate' => $r['install_date'],
     'notes' => $r['notes'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_time_entries(PDO $pdo, ?array $buildingIds): array {
+  $sql = 'SELECT * FROM time_entries';
+  $params = [];
+  if ($buildingIds !== null) {
+    $sql .= ' WHERE building_id IN (' . pm_in_clause($buildingIds) . ')';
+    $params = $buildingIds ?: [0];
+  }
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'buildingId' => (int)$r['building_id'],
+    'unitId' => $r['unit_id'] !== null ? (int)$r['unit_id'] : null,
+    'userId' => $r['user_id'] !== null ? (int)$r['user_id'] : null,
+    'date' => $r['date'], 'activity' => $r['activity'], 'hours' => (float)$r['hours'],
+    'rate' => (float)$r['rate'], 'description' => $r['description'], 'notes' => $r['notes'],
   ], $stmt->fetchAll());
 }
 
@@ -367,12 +412,16 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
   switch ($entity) {
     case 'building': {
       $id = (int)($r['id'] ?? 0);
+      $profileFields = [
+        $r['roofLastServiced'] ?: null, $r['roofNotes'] ?? '', $r['electricalLoad'] ?? '',
+        $r['exteriorPaintColor'] ?? '', $r['profileNotes'] ?? '',
+      ];
       if ($id) {
-        $stmt = $pdo->prepare('UPDATE buildings SET name=?, address=?, fee_type=?, fee_value=? WHERE id=?');
-        $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue'], $id]);
+        $stmt = $pdo->prepare('UPDATE buildings SET name=?, address=?, fee_type=?, fee_value=?, roof_last_serviced=?, roof_notes=?, electrical_load=?, exterior_paint_color=?, profile_notes=? WHERE id=?');
+        $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue'], ...$profileFields, $id]);
       } else {
-        $stmt = $pdo->prepare('INSERT INTO buildings (name, address, fee_type, fee_value) VALUES (?,?,?,?)');
-        $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue']]);
+        $stmt = $pdo->prepare('INSERT INTO buildings (name, address, fee_type, fee_value, roof_last_serviced, roof_notes, electrical_load, exterior_paint_color, profile_notes) VALUES (?,?,?,?,?,?,?,?,?)');
+        $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue'], ...$profileFields]);
         $id = (int)$pdo->lastInsertId();
       }
       $pdo->prepare('DELETE FROM building_owners WHERE building_id = ?')->execute([$id]);
@@ -384,12 +433,38 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
     }
     case 'unit': {
       $id = (int)($r['id'] ?? 0);
-      $fields = [$r['buildingId'], $r['number'], $r['beds'], $r['baths'], $r['sqft'] ?: null, $r['notes'] ?? ''];
+      $fields = [$r['buildingId'], $r['number'], $r['beds'], $r['baths'], $r['sqft'] ?: null, $r['notes'] ?? '', $r['wallColor'] ?? '', $r['faceplateColor'] ?? ''];
       if ($id) {
-        $pdo->prepare('UPDATE units SET building_id=?, number=?, beds=?, baths=?, sqft=?, notes=? WHERE id=?')
+        $pdo->prepare('UPDATE units SET building_id=?, number=?, beds=?, baths=?, sqft=?, notes=?, wall_color=?, faceplate_color=? WHERE id=?')
           ->execute([...$fields, $id]);
       } else {
-        $pdo->prepare('INSERT INTO units (building_id, number, beds, baths, sqft, notes) VALUES (?,?,?,?,?,?)')
+        $pdo->prepare('INSERT INTO units (building_id, number, beds, baths, sqft, notes, wall_color, faceplate_color) VALUES (?,?,?,?,?,?,?,?)')
+          ->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
+    case 'appliance': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['unitId'], $r['type'], $r['make'] ?? '', $r['model'] ?? '', $r['serialNumber'] ?? '', $r['installDate'] ?: null, $r['notes'] ?? ''];
+      if ($id) {
+        $pdo->prepare('UPDATE appliances SET unit_id=?, type=?, make=?, model=?, serial_number=?, install_date=?, notes=? WHERE id=?')
+          ->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO appliances (unit_id, type, make, model, serial_number, install_date, notes) VALUES (?,?,?,?,?,?,?)')
+          ->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
+    case 'timeEntry': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['buildingId'], $r['unitId'] ?: null, $r['userId'] ?: null, $r['date'], $r['activity'], $r['hours'], $r['rate'], $r['description'] ?? '', $r['notes'] ?? ''];
+      if ($id) {
+        $pdo->prepare('UPDATE time_entries SET building_id=?, unit_id=?, user_id=?, date=?, activity=?, hours=?, rate=?, description=?, notes=? WHERE id=?')
+          ->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO time_entries (building_id, unit_id, user_id, date, activity, hours, rate, description, notes) VALUES (?,?,?,?,?,?,?,?,?)')
           ->execute($fields);
         $id = (int)$pdo->lastInsertId();
       }
@@ -499,6 +574,7 @@ function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
     'building' => 'buildings', 'unit' => 'units', 'owner' => 'owners', 'tenant' => 'tenants',
     'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
     'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
+    'appliance' => 'appliances', 'timeEntry' => 'time_entries',
   ][$entity] ?? null;
   if (!$table) throw new PmUserError("Unknown entity: $entity");
   $pdo->prepare("DELETE FROM $table WHERE id = ?")->execute([$id]);
@@ -591,23 +667,24 @@ function pm_save_user(PDO $pdo, array $r): array {
   $displayName = (string)($r['displayName'] ?? '');
   $email = (string)($r['email'] ?? '');
   $password = (string)($r['password'] ?? '');
+  $hourlyRate = ($r['hourlyRate'] ?? '') === '' ? null : (float)$r['hourlyRate'];
 
   if ($username === '') return ['ok' => false, 'message' => 'Username is required.'];
   if ($role === 'owner' && !$ownerId) return ['ok' => false, 'message' => 'An owner-role login must be linked to an owner.'];
 
   if ($id) {
     if ($password !== '') {
-      $pdo->prepare('UPDATE users SET username=?, role=?, owner_id=?, display_name=?, email=?, password_hash=? WHERE id=?')
-        ->execute([$username, $role, $ownerId, $displayName, $email, password_hash($password, PASSWORD_DEFAULT), $id]);
+      $pdo->prepare('UPDATE users SET username=?, role=?, owner_id=?, display_name=?, email=?, hourly_rate=?, password_hash=? WHERE id=?')
+        ->execute([$username, $role, $ownerId, $displayName, $email, $hourlyRate, password_hash($password, PASSWORD_DEFAULT), $id]);
     } else {
-      $pdo->prepare('UPDATE users SET username=?, role=?, owner_id=?, display_name=?, email=? WHERE id=?')
-        ->execute([$username, $role, $ownerId, $displayName, $email, $id]);
+      $pdo->prepare('UPDATE users SET username=?, role=?, owner_id=?, display_name=?, email=?, hourly_rate=? WHERE id=?')
+        ->execute([$username, $role, $ownerId, $displayName, $email, $hourlyRate, $id]);
     }
   } else {
     if ($password === '') return ['ok' => false, 'message' => 'Password is required for a new user.'];
     try {
-      $pdo->prepare('INSERT INTO users (username, password_hash, role, owner_id, display_name, email) VALUES (?,?,?,?,?,?)')
-        ->execute([$username, password_hash($password, PASSWORD_DEFAULT), $role, $ownerId, $displayName, $email]);
+      $pdo->prepare('INSERT INTO users (username, password_hash, role, owner_id, display_name, email, hourly_rate) VALUES (?,?,?,?,?,?,?)')
+        ->execute([$username, password_hash($password, PASSWORD_DEFAULT), $role, $ownerId, $displayName, $email, $hourlyRate]);
       $id = (int)$pdo->lastInsertId();
     } catch (PDOException $e) {
       if ($e->getCode() === '23000') return ['ok' => false, 'message' => 'That username is already taken.'];

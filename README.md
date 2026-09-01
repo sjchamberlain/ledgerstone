@@ -1,9 +1,11 @@
 # Ledgerstone — cPanel setup
 
 A property management app: buildings, units, owners, tenants, leases, a
-tenant ledger with aging, maintenance tracking, owner billing, and a
-communications log. Two account types: **staff** (full access) and
-**owner** (read-only, scoped to the buildings they own).
+tenant ledger with aging, maintenance tracking, owner billing, a
+communications log, building/unit profiles with a per-unit appliance list,
+and a staff timecard tool for tracking labor by activity and building/unit.
+Two account types: **staff** (full access) and **owner** (read-only,
+scoped to the buildings they own).
 
 Stack: PHP + MySQL. No Node, no build step, no Composer dependencies —
 this is intentionally the simplest thing that works on ordinary shared
@@ -124,6 +126,35 @@ one) should include it once the database exists, but confirm that
 rather than assuming it. A manual export from phpMyAdmin
 (**Export → Quick → Go**) takes ten seconds and is worth doing before
 any big change (e.g. before importing a new schema version).
+
+## Updating an existing install (new columns/tables)
+
+If your database was created before building/unit profiles or Timecards
+existed, run `migrations/002_profiles_timecards_owner_statement.sql`
+once via phpMyAdmin's SQL tab (Export your database first, as always
+before a schema change). A fresh install via the current `schema.sql`
+already has everything and doesn't need this file.
+
+## Building/unit profiles, appliances, and timecards
+
+- **Properties** → a building's edit form now has roof/electrical/exterior
+  paint fields. Click a unit's number (or its **Profile** button) to open
+  its profile page: wall color, faceplate color, and a repeatable
+  appliance list (type, make, model, serial #, install date — age is
+  computed from that date).
+- **Timecards** (staff only) logs hours against a building (and
+  optionally a specific unit) under one of six activities (Administrative,
+  Leasing, Turnover, Repairs, Maintenance, Other), each with an hourly
+  rate captured on the entry itself. A default rate can be set per staff
+  login in **Users**. The tab includes a profitability snapshot — rent
+  collected vs. labor cost for a building over a date range.
+- **Reports → Owner statement** is now a full monthly-statement view per
+  building: occupied/vacant units, income, outstanding arrears, open
+  maintenance count, repairs completed in the period (with cost), the
+  projected annual rent roll, and net to owner after the management fee.
+  Run it monthly and use **Print** (or your browser's "Save as PDF") to
+  send it to the owner — there's no automated email sender built in yet,
+  since this app has no mail server configuration.
 
 ## Extending this later
 

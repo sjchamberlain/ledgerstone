@@ -15,7 +15,12 @@ CREATE TABLE buildings (
   name VARCHAR(150) NOT NULL,
   address VARCHAR(255),
   fee_type ENUM('percent','flat') NOT NULL DEFAULT 'percent',
-  fee_value DECIMAL(10,2) NOT NULL DEFAULT 0
+  fee_value DECIMAL(10,2) NOT NULL DEFAULT 0,
+  roof_last_serviced DATE NULL,
+  roof_notes TEXT NULL,
+  electrical_load VARCHAR(100) NULL,      -- e.g. "200A 3-phase"
+  exterior_paint_color VARCHAR(150) NULL, -- brand + code, e.g. "SW 7006 Extra White"
+  profile_notes TEXT NULL
 ) ENGINE=InnoDB;
 
 CREATE TABLE building_owners (
@@ -35,7 +40,21 @@ CREATE TABLE units (
   baths DECIMAL(3,1) DEFAULT 1,
   sqft INT,
   notes TEXT,
+  wall_color VARCHAR(100) NULL,
+  faceplate_color VARCHAR(100) NULL,
   FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE appliances (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  unit_id INT NOT NULL,
+  type VARCHAR(100) NOT NULL,       -- e.g. Stove, Refrigerator, Washer, Dryer, Water Heater, HVAC
+  make VARCHAR(100),
+  model VARCHAR(100),
+  serial_number VARCHAR(100),
+  install_date DATE NULL,           -- basis for computing age
+  notes TEXT,
+  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE tenants (
@@ -132,11 +151,28 @@ CREATE TABLE users (
   owner_id INT NULL,               -- set only when role = 'owner'; links the login to an owners row
   display_name VARCHAR(150),
   email VARCHAR(150),
+  hourly_rate DECIMAL(8,2) NULL,   -- default $/hr for this user's time entries; blank = no default
   failed_attempts INT NOT NULL DEFAULT 0,
   locked_until DATETIME NULL,      -- login/password-change lockout; NULL = not locked
   must_change_password TINYINT(1) NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE time_entries (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  building_id INT NOT NULL,
+  unit_id INT NULL,
+  user_id INT NULL,
+  date DATE NOT NULL,
+  activity ENUM('admin','leasing','turnover','repairs','maintenance','other') NOT NULL DEFAULT 'other',
+  hours DECIMAL(5,2) NOT NULL DEFAULT 0,
+  rate DECIMAL(8,2) NOT NULL DEFAULT 0, -- $/hr at time of entry, independent of the user's current default
+  description VARCHAR(255),
+  notes TEXT,
+  FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE SET NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- Seed one admin account so you can log in the first time.
