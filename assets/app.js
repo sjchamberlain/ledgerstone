@@ -6,7 +6,8 @@
    ========================================================= */
 let DATA = {
   buildings: [], units: [], owners: [], tenants: [], leases: [],
-  ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: []
+  ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: [],
+  appliances: [], timeEntries: []
 };
 let CURRENT_USER = window.PM_USER || {role:'owner'};
 let CSRF_TOKEN = window.PM_CSRF || '';
@@ -71,6 +72,8 @@ function pm_normalize_ids(data){
   (data.ownerLedger||[]).forEach(e=>{ e.id=s(e.id); e.ownerId=s(e.ownerId); e.buildingId=s(e.buildingId); });
   (data.communications||[]).forEach(c=>{ c.id=s(c.id); c.ownerId=s(c.ownerId); c.buildingId=s(c.buildingId); });
   (data.tenantCommunications||[]).forEach(c=>{ c.id=s(c.id); c.tenantId=s(c.tenantId); c.leaseId=s(c.leaseId); });
+  (data.appliances||[]).forEach(a=>{ a.id=s(a.id); a.unitId=s(a.unitId); });
+  (data.timeEntries||[]).forEach(t=>{ t.id=s(t.id); t.buildingId=s(t.buildingId); t.unitId=s(t.unitId); t.userId=s(t.userId); });
   if(data.currentUser) data.currentUser.ownerId = s(data.currentUser.ownerId);
 }
 function pm_normalize_user_row(u){
@@ -211,10 +214,13 @@ let ledgerSelectedLease = null;
 let filters = { maintBuilding:'', ownerBillBuilding:'', commOwner:'', commBuilding:'', tcommTenant:'', tcommBuilding:'', commContactType:'' };
 let viewingOwnerId = null;
 let viewingTenantId = null;
+let viewingUnitId = null;
 let peopleSubTab = 'owners'; // 'owners' | 'tenants' — sub-view within the merged People tab
 let ownerReportState = { ownerId:'', start:'', end:'' , building:''};
 let arrearsReportState = { asOf: todayISO(), building:'' };
 let feeGenState = { buildingId:'', month: new Date().toISOString().slice(0,7) };
+let timecardFilters = { building:'', activity:'' };
+let timecardReportState = { building:'', start:'', end:'' };
 
 const NAV_BASE = [
   {id:'dashboard', label:'Dashboard'},
@@ -227,7 +233,7 @@ const NAV_BASE = [
   {id:'communications', label:'Communications'},
   {id:'reports', label:'Reports'}
 ];
-const NAV_ADMIN_ONLY = [{id:'users', label:'Users'}];
+const NAV_ADMIN_ONLY = [{id:'timecards', label:'Timecards'}, {id:'users', label:'Users'}];
 function currentNav(){ return isAdmin() ? [...NAV_BASE, ...NAV_ADMIN_ONLY] : NAV_BASE; }
 
 function setTab(t){
@@ -282,6 +288,7 @@ function renderTab(){
     case 'billing': return renderBilling();
     case 'communications': return renderCommunications();
     case 'reports': return renderReports();
+    case 'timecards': return isAdmin() ? renderTimecards() : renderDashboard();
     case 'users': return isAdmin() ? renderUsers() : renderDashboard();
     default: return '';
   }
@@ -349,7 +356,13 @@ function statusTag(s){
 /* =========================================================
    PROPERTIES: BUILDINGS + UNITS
    ========================================================= */
+function applianceAge(installDate){
+  if(!installDate) return null;
+  const years = daysBetween(todayISO(), installDate)/365.25;
+  return Math.max(0, Math.floor(years));
+}
 function renderProperties(){
+  if(viewingUnitId) return renderUnitDetail(viewingUnitId);
   const blocks = DATA.buildings.map(b=>{
     const units = unitsForBuilding(b.id);
     const ownerLine = (b.owners||[]).map(o=>{
@@ -370,16 +383,22 @@ function renderProperties(){
           <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete ${esc(b.name)} and all its units? Leases and ledger tied to those units will remain but become unlinked from a building.','deleteBuilding','${b.id}')">Delete</button>
         </div>
       </div>
+      ${(b.roofLastServiced||b.electricalLoad||b.exteriorPaintColor||b.profileNotes)? `<div class="subtle" style="padding:0 16px 10px;">
+        ${b.roofLastServiced? `Roof last serviced: ${fmtDate(b.roofLastServiced)}` : ''}
+        ${b.electricalLoad? ` &nbsp;·&nbsp; Electrical: ${esc(b.electricalLoad)}` : ''}
+        ${b.exteriorPaintColor? ` &nbsp;·&nbsp; Exterior paint: ${esc(b.exteriorPaintColor)}` : ''}
+      </div>` : ''}
       <div class="unit-table-wrap">
         ${units.length? `<table><thead><tr><th>Unit</th><th>Beds</th><th>Baths</th><th>Sqft</th><th>Status</th><th>Tenant</th><th></th></tr></thead><tbody>
           ${units.map(u=>{
             const lease = activeLeaseForUnit(u.id);
             const tenant = lease? getTenant(lease.tenantId) : null;
             return `<tr>
-              <td>${esc(u.number)}</td><td>${esc(u.beds)}</td><td>${esc(u.baths)}</td><td>${esc(u.sqft||'—')}</td>
+              <td><span class="mini-link" onclick="viewingUnitId='${u.id}';render();">${esc(u.number)}</span></td><td>${esc(u.beds)}</td><td>${esc(u.baths)}</td><td>${esc(u.sqft||'—')}</td>
               <td>${lease? statusTag('active') : '<span class="tag tag-neutral">Vacant</span>'}</td>
               <td>${tenant? esc(tenant.name) : '—'}</td>
               <td class="row" style="justify-content:flex-end;">
+                <button class="btn btn-ghost btn-sm" onclick="viewingUnitId='${u.id}';render();">Profile</button>
                 <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('unit','edit','${u.id}')">Edit</button>
                 <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete unit ${esc(u.number)}?','deleteUnit','${u.id}')">Delete</button>
               </td>
@@ -397,6 +416,55 @@ function renderProperties(){
   </div>
   ${blocks || '<div class="panel"><div class="empty">No buildings yet. Add your first one to get started.</div></div>'}
   `;
+}
+
+/* =========================================================
+   UNIT PROFILE (wall/faceplate color, appliances)
+   ========================================================= */
+function renderUnitDetail(id){
+  const u = getUnit(id);
+  if(!u){ viewingUnitId=null; return renderProperties(); }
+  const b = getBuilding(u.buildingId);
+  const appliances = DATA.appliances.filter(a=>a.unitId===u.id);
+  const rows = appliances.map(a=>{
+    const age = applianceAge(a.installDate);
+    return `<tr>
+      <td>${esc(a.type)}</td><td>${esc(a.make||'—')}</td><td>${esc(a.model||'—')}</td><td>${esc(a.serialNumber||'—')}</td>
+      <td>${a.installDate? fmtDate(a.installDate) : '—'}</td>
+      <td>${age===null? '—' : (age===0?'<1 yr':age+' yr')}</td>
+      <td class="row" style="justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('appliance','edit','${a.id}')">Edit</button>
+        <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this appliance record?','deleteAppliance','${a.id}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="page-head">
+    <div>
+      <span class="mini-link" onclick="viewingUnitId=null;render();">← Back to properties</span>
+      <h1 class="page-title" style="margin-top:6px;">${esc(b?b.name:'?')} · Unit ${esc(u.number)}</h1>
+      <div class="page-sub">${esc(u.beds)} bed / ${esc(u.baths)} bath${u.sqft?' · '+esc(u.sqft)+' sqft':''}</div>
+    </div>
+    <button class="btn btn-ghost admin-only" onclick="openModal('unit','edit','${u.id}')">Edit unit</button>
+  </div>
+
+  <div class="panel">
+    <h3>Interior profile</h3>
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Wall color</div><div class="kpi-value" style="font-size:15px;">${esc(u.wallColor||'—')}</div></div>
+      <div class="kpi"><div class="kpi-label">Faceplate color</div><div class="kpi-value" style="font-size:15px;">${esc(u.faceplateColor||'—')}</div></div>
+    </div>
+    ${u.notes? `<div class="subtle" style="margin-top:4px;">${esc(u.notes)}</div>` : ''}
+  </div>
+
+  <div class="panel">
+    <div class="page-head" style="margin-bottom:12px;">
+      <h3 style="margin:0;">Appliances</h3>
+      <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('appliance','add',null,'${u.id}')">+ Add Appliance</button>
+    </div>
+    ${appliances.length? `<table><thead><tr><th>Type</th><th>Make</th><th>Model</th><th>Serial #</th><th>Installed</th><th>Age</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No appliances logged for this unit yet.</div>`}
+  </div>`;
 }
 
 /* =========================================================
@@ -928,15 +996,34 @@ function renderOwnerReport(){
   if(ownerReportState.ownerId && ownerReportState.start && ownerReportState.end){
     const owner = getOwner(ownerReportState.ownerId);
     const stakeBuildings = DATA.buildings.filter(b=>(b.owners||[]).some(o=>o.ownerId===owner.id));
+    const asOf = ownerReportState.end;
     let grandNet = 0;
-    const rowsHtml = stakeBuildings.map(b=>{
+
+    const buildingBlocks = stakeBuildings.map(b=>{
       const pct = b.owners.find(o=>o.ownerId===owner.id).pct;
-      const unitIds = unitsForBuilding(b.id).map(u=>u.id);
+      const units = unitsForBuilding(b.id);
+      const unitIds = units.map(u=>u.id);
       const leaseIds = DATA.leases.filter(l=>unitIds.includes(l.unitId)).map(l=>l.id);
+      const activeLeases = DATA.leases.filter(l=>unitIds.includes(l.unitId) && l.status==='active');
+
       const rent = DATA.ledger.filter(e=>e.type==='payment' && e.category==='rent' && leaseIds.includes(e.leaseId) && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
       const otherIncome = DATA.ledger.filter(e=>e.type==='payment' && e.category!=='rent' && leaseIds.includes(e.leaseId) && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
-      const maint = DATA.maintenance.filter(m=>m.buildingId===b.id && isDateInRange(m.dateCompleted||m.dateReported, ownerReportState.start, ownerReportState.end)).reduce((s,m)=>s+Number(m.cost||0),0);
       const gross = rent + otherIncome;
+
+      const completedMaint = DATA.maintenance.filter(m=>m.buildingId===b.id && m.status==='completed' && isDateInRange(m.dateCompleted, ownerReportState.start, ownerReportState.end));
+      const maint = completedMaint.reduce((s,m)=>s+Number(m.cost||0),0);
+      const openMaint = DATA.maintenance.filter(m=>{
+        if(m.status==='completed') return false;
+        return m.buildingId===b.id || unitIds.includes(m.unitId);
+      });
+
+      const occupied = units.filter(u=>activeLeaseForUnit(u.id)).length;
+      const vacant = units.length - occupied;
+
+      const arrears = activeLeases.reduce((s,l)=> s + Math.max(0, fifoAging(l.id, asOf).balance), 0);
+
+      const projectedAnnualRent = activeLeases.reduce((s,l)=>s+Number(l.rentAmount),0) * 12;
+
       const netOperating = gross - maint;
       const ownerGross = gross * pct/100;
       const ownerMaint = maint * pct/100;
@@ -944,17 +1031,37 @@ function renderOwnerReport(){
       const fee = DATA.ownerLedger.filter(e=>e.ownerId===owner.id && e.buildingId===b.id && e.type==='charge' && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
       const netToOwner = ownerNetOperating - fee;
       grandNet += netToOwner;
-      return `<tr><td>${esc(b.name)}</td><td class="num">${pct}%</td><td class="num">${money(ownerGross)}</td><td class="num">${money(ownerMaint)}</td><td class="num">${money(fee)}</td><td class="num" style="font-weight:600;">${money(netToOwner)}</td></tr>`;
+
+      const maintRows = completedMaint.map(m=>`<tr><td>${fmtDate(m.dateCompleted)}</td><td>${esc(m.title)}</td><td>${esc(m.unitId?getUnit(m.unitId)?.number||'—':'Whole building')}</td><td class="num">${money(m.cost||0)}</td></tr>`).join('');
+
+      return `
+      <div class="building-block">
+        <div class="building-head"><h4>${esc(b.name)} <span class="subtle">(${pct}% stake)</span></h4></div>
+        <div style="padding:14px 16px;">
+          <div class="kpi-grid">
+            <div class="kpi"><div class="kpi-label">Units occupied / vacant</div><div class="kpi-value">${occupied} / ${vacant}</div></div>
+            <div class="kpi"><div class="kpi-label">Rent &amp; other income</div><div class="kpi-value">${money(gross)}</div></div>
+            <div class="kpi"><div class="kpi-label">Outstanding arrears</div><div class="kpi-value ${arrears>0.5?'bad':''}">${money(arrears)}</div></div>
+            <div class="kpi"><div class="kpi-label">Open maintenance</div><div class="kpi-value">${openMaint.length}</div></div>
+            <div class="kpi"><div class="kpi-label">Projected annual rent roll</div><div class="kpi-value">${money(projectedAnnualRent)}</div></div>
+            <div class="kpi"><div class="kpi-label">Net to owner, this period</div><div class="kpi-value ${netToOwner<0?'bad':'good'}">${money(netToOwner)}</div></div>
+          </div>
+          <table style="margin-bottom:10px;"><thead><tr><th></th><th class="num">Owner's Gross Income</th><th class="num">Owner's Maint. Share</th><th class="num">Mgmt Fee</th><th class="num">Net to Owner</th></tr></thead>
+          <tbody><tr><td>${esc(b.name)}</td><td class="num">${money(ownerGross)}</td><td class="num">${money(ownerMaint)}</td><td class="num">${money(fee)}</td><td class="num" style="font-weight:600;">${money(netToOwner)}</td></tr></tbody></table>
+          <div class="subtle" style="margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em;font-size:11.5px;">Repairs completed this period</div>
+          ${maintRows? `<table><thead><tr><th>Date</th><th>Item</th><th>Unit</th><th class="num">Cost</th></tr></thead><tbody>${maintRows}</tbody></table>` : `<div class="empty">No repairs completed in this period.</div>`}
+        </div>
+      </div>`;
     }).join('');
+
     content = `
-    <table><thead><tr><th>Building</th><th class="num">Stake</th><th class="num">Owner's Gross Income</th><th class="num">Owner's Maint. Share</th><th class="num">Mgmt Fee</th><th class="num">Net to Owner</th></tr></thead>
-    <tbody>${rowsHtml || '<tr><td colspan="6" class="empty">This owner has no building stakes.</td></tr>'}
-    ${stakeBuildings.length? `<tr class="report-total-row"><td colspan="5">Total, ${esc(owner.name)}</td><td class="num">${money(grandNet)}</td></tr>` : ''}
-    </tbody></table>`;
+    ${buildingBlocks || '<div class="panel"><div class="empty">This owner has no building stakes.</div></div>'}
+    ${stakeBuildings.length? `<div class="panel"><table><tbody><tr class="report-total-row"><td>Total, ${esc(owner.name)} — all buildings</td><td class="num">${money(grandNet)}</td></tr></tbody></table></div>` : ''}`;
   }
   return `
   <div class="panel">
     <h3>Owner statement</h3>
+    <div class="page-sub" style="margin:-6px 0 14px;">A full-picture monthly statement — run it for the past month and print or save it to send to the owner.</div>
     <div class="row" style="align-items:flex-end;margin-bottom:14px;">
       <div class="field" style="min-width:200px;"><label>Owner</label><select onchange="ownerReportState.ownerId=this.value;render();"><option value="">— choose —</option>${ownerOptions}</select></div>
       <div class="field" style="min-width:150px;"><label>Start</label><input type="date" value="${ownerReportState.start}" oninput="ownerReportState.start=this.value;"></div>
@@ -1056,8 +1163,105 @@ function userForm(){
   ${draft.role==='owner'? `<div class="field"><label>Linked owner record</label><select onchange="updateDraft('ownerId',this.value)"><option value="">— select —</option>${ownerOpts}</select></div>` : ''}
   <div class="field"><label>Display name</label><input value="${esc(draft.displayName)}" oninput="updateDraft('displayName',this.value)"></div>
   <div class="field"><label>Email</label><input value="${esc(draft.email)}" oninput="updateDraft('email',this.value)"></div>
+  ${draft.role==='admin'? `<div class="field"><label>Default hourly rate (optional)</label><input type="number" step="0.01" value="${draft.hourlyRate==null?'':draft.hourlyRate}" oninput="updateDraft('hourlyRate',this.value)" placeholder="Used to prefill Timecards entries"></div>` : ''}
   <div class="field"><label>${draft.id?'New password (leave blank to keep current)':'Password'}</label><input type="password" oninput="updateDraft('password',this.value)"></div>`;
 }
+/* =========================================================
+   TIMECARDS (admin only) — hours by activity, tied to a building/unit,
+   plus a labor-cost-vs-rent-collected profitability snapshot
+   ========================================================= */
+function activityLabel(a){
+  return {admin:'Administrative', leasing:'Leasing', turnover:'Turnover', repairs:'Repairs', maintenance:'Maintenance', other:'Other'}[a] || a;
+}
+function renderTimecards(){
+  const buildingOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${timecardFilters.building===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  const activityOptions = ['admin','leasing','turnover','repairs','maintenance','other']
+    .map(a=>`<option value="${a}" ${timecardFilters.activity===a?'selected':''}>${activityLabel(a)}</option>`).join('');
+
+  let list = DATA.timeEntries.slice();
+  if(timecardFilters.building) list = list.filter(t=>t.buildingId===timecardFilters.building);
+  if(timecardFilters.activity) list = list.filter(t=>t.activity===timecardFilters.activity);
+  list.sort((a,b)=> b.date<a.date?-1:1);
+
+  const rows = list.map(t=>`<tr>
+    <td>${fmtDate(t.date)}</td>
+    <td>${esc(getBuilding(t.buildingId)?.name||'—')}${t.unitId? ' · '+esc(getUnit(t.unitId)?.number||'') : ''}</td>
+    <td>${activityLabel(t.activity)}</td>
+    <td>${esc(t.description||'—')}</td>
+    <td class="num">${Number(t.hours).toFixed(2)}</td>
+    <td class="num">${money(t.rate)}</td>
+    <td class="num">${money(Number(t.hours)*Number(t.rate))}</td>
+    <td class="row" style="justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="openModal('timeEntry','edit','${t.id}')">Edit</button>
+      <button class="btn-danger btn btn-sm" onclick="askDelete('Delete this time entry?','deleteTimeEntry','${t.id}')">Delete</button>
+    </td>
+  </tr>`).join('');
+
+  const totalHours = list.reduce((s,t)=>s+Number(t.hours),0);
+  const totalCost = list.reduce((s,t)=>s+Number(t.hours)*Number(t.rate),0);
+
+  return `
+  <div class="page-head">
+    <div><h1 class="page-title">Timecards</h1><div class="page-sub">Hours by activity, tied to a building or unit</div></div>
+    <button class="btn" onclick="openModal('timeEntry','add')">+ Log Time</button>
+  </div>
+  <div class="filter-bar">
+    <select onchange="timecardFilters.building=this.value;render();"><option value="">All buildings</option>${buildingOptions}</select>
+    <select onchange="timecardFilters.activity=this.value;render();"><option value="">All activities</option>${activityOptions}</select>
+  </div>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-label">Hours (filtered)</div><div class="kpi-value">${totalHours.toFixed(2)}</div></div>
+    <div class="kpi"><div class="kpi-label">Labor cost (filtered)</div><div class="kpi-value">${money(totalCost)}</div></div>
+  </div>
+  <div class="panel">
+    ${list.length? `<table><thead><tr><th>Date</th><th>Location</th><th>Activity</th><th>Description</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Cost</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No time entries logged yet.</div>`}
+  </div>
+  ${renderProfitabilityReport()}
+  `;
+}
+
+function renderProfitabilityReport(){
+  const buildingOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${timecardReportState.building===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  let content = '<div class="empty">Choose a building and a date range.</div>';
+  if(timecardReportState.building && timecardReportState.start && timecardReportState.end){
+    const b = getBuilding(timecardReportState.building);
+    const unitIds = unitsForBuilding(b.id).map(u=>u.id);
+    const leaseIds = DATA.leases.filter(l=>unitIds.includes(l.unitId)).map(l=>l.id);
+    const rentCollected = DATA.ledger.filter(e=>e.type==='payment' && leaseIds.includes(e.leaseId) && isDateInRange(e.date, timecardReportState.start, timecardReportState.end))
+      .reduce((s,e)=>s+Number(e.amount),0);
+    const entries = DATA.timeEntries.filter(t=>t.buildingId===b.id && isDateInRange(t.date, timecardReportState.start, timecardReportState.end));
+    const byActivity = {};
+    entries.forEach(t=>{
+      byActivity[t.activity] = byActivity[t.activity] || {hours:0, cost:0};
+      byActivity[t.activity].hours += Number(t.hours);
+      byActivity[t.activity].cost += Number(t.hours)*Number(t.rate);
+    });
+    const laborCost = entries.reduce((s,t)=>s+Number(t.hours)*Number(t.rate),0);
+    const laborHours = entries.reduce((s,t)=>s+Number(t.hours),0);
+    const net = rentCollected - laborCost;
+    const activityRows = Object.keys(byActivity).sort().map(a=>`<tr><td>${activityLabel(a)}</td><td class="num">${byActivity[a].hours.toFixed(2)}</td><td class="num">${money(byActivity[a].cost)}</td></tr>`).join('');
+    content = `
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-label">Rent collected</div><div class="kpi-value">${money(rentCollected)}</div></div>
+      <div class="kpi"><div class="kpi-label">Labor hours</div><div class="kpi-value">${laborHours.toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label">Labor cost</div><div class="kpi-value">${money(laborCost)}</div></div>
+      <div class="kpi"><div class="kpi-label">Net (rent − labor)</div><div class="kpi-value ${net<0?'bad':'good'}">${money(net)}</div></div>
+    </div>
+    ${activityRows? `<table><thead><tr><th>Activity</th><th class="num">Hours</th><th class="num">Cost</th></tr></thead><tbody>${activityRows}</tbody></table>` : '<div class="empty">No time logged against this building in this range.</div>'}`;
+  }
+  return `
+  <div class="panel">
+    <h3>Profitability snapshot</h3>
+    <div class="row" style="align-items:flex-end;margin-bottom:14px;">
+      <div class="field" style="min-width:200px;"><label>Building</label><select onchange="timecardReportState.building=this.value;render();"><option value="">— choose —</option>${buildingOptions}</select></div>
+      <div class="field" style="min-width:150px;"><label>Start</label><input type="date" value="${timecardReportState.start}" oninput="timecardReportState.start=this.value;"></div>
+      <div class="field" style="min-width:150px;"><label>End</label><input type="date" value="${timecardReportState.end}" oninput="timecardReportState.end=this.value;"></div>
+      <button class="btn btn-ghost" onclick="render()">Run</button>
+    </div>
+    ${content}
+  </div>`;
+}
+
 function changePasswordForm(){
   return `
   <div class="field"><label>Current password</label><input type="password" oninput="updateDraft('current',this.value)"></div>
@@ -1072,10 +1276,16 @@ function openModal(type, mode, id, extra){
   modal = {type, mode, id};
   switch(type){
     case 'building':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(getBuilding(id))) : {id:null, name:'', address:'', feeType:'percent', feeValue:8, owners:[]};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getBuilding(id))) : {id:null, name:'', address:'', feeType:'percent', feeValue:8, owners:[], roofLastServiced:'', roofNotes:'', electricalLoad:'', exteriorPaintColor:'', profileNotes:''};
       break;
     case 'unit':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(getUnit(id))) : {id:null, buildingId: extra||'', number:'', beds:1, baths:1, sqft:'', notes:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getUnit(id))) : {id:null, buildingId: extra||'', number:'', beds:1, baths:1, sqft:'', notes:'', wallColor:'', faceplateColor:''};
+      break;
+    case 'appliance':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.appliances.find(a=>a.id===id))) : {id:null, unitId: extra||'', type:'Stove', make:'', model:'', serialNumber:'', installDate:'', notes:''};
+      break;
+    case 'timeEntry':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.timeEntries.find(t=>t.id===id))) : {id:null, buildingId: extra||'', unitId:'', userId: CURRENT_USER.id!=null?String(CURRENT_USER.id):'', date: todayISO(), activity:'admin', hours:1, rate: CURRENT_USER.hourlyRate||0, description:'', notes:''};
       break;
     case 'owner':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getOwner(id))) : {id:null, name:'', email:'', phone:''};
@@ -1105,7 +1315,7 @@ function openModal(type, mode, id, extra){
       draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.tenantCommunications.find(c=>c.id===id))) : {id:null, tenantId: extra||'', leaseId:'', date: todayISO(), method:'call', subject:'', notes:'', followUpDate:''};
       break;
     case 'user':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(USERS_LIST.find(u=>u.id===id))) : {id:null, username:'', role:'owner', ownerId:'', displayName:'', email:'', password:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(USERS_LIST.find(u=>u.id===id))) : {id:null, username:'', role:'owner', ownerId:'', displayName:'', email:'', hourlyRate:'', password:''};
       if(mode==='edit') draft.password = '';
       break;
     case 'changePassword':
@@ -1177,6 +1387,8 @@ function renderModal(){
     case 'ownerLedger': title = 'Owner Billing Entry'; body = ownerLedgerForm(); break;
     case 'communication': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = communicationForm(); break;
     case 'tenantComm': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = tenantCommForm(); break;
+    case 'appliance': title = modal.mode==='add'?'Add Appliance':'Edit Appliance'; body = applianceForm(); break;
+    case 'timeEntry': title = modal.mode==='add'?'Log Time':'Edit Time Entry'; body = timeEntryForm(); break;
     case 'user': title = modal.mode==='add'?'Add User':'Edit User'; body = userForm(); break;
     case 'changePassword': title = 'Change Password'; body = changePasswordForm(); break;
   }
@@ -1223,7 +1435,15 @@ function buildingForm(){
     </div>
     <span class="mini-link" onclick="addOwnerRow()">+ add owner</span>
     ${DATA.owners.length===0? '<div class="subtle" style="margin-top:6px;">No owners in the system yet — add one from the Owners tab first.</div>' : ''}
-  </div>`;
+  </div>
+  <div class="section-divider">Building profile</div>
+  <div class="field-row">
+    <div class="field"><label>Roof last serviced</label><input type="date" value="${draft.roofLastServiced||''}" oninput="updateDraft('roofLastServiced',this.value)"></div>
+    <div class="field"><label>Electrical load</label><input value="${esc(draft.electricalLoad||'')}" oninput="updateDraft('electricalLoad',this.value)" placeholder="e.g. 200A 3-phase"></div>
+  </div>
+  <div class="field"><label>Exterior paint color</label><input value="${esc(draft.exteriorPaintColor||'')}" oninput="updateDraft('exteriorPaintColor',this.value)" placeholder="Brand + code, e.g. SW 7006 Extra White"></div>
+  <div class="field"><label>Roof notes</label><textarea oninput="updateDraft('roofNotes',this.value)" placeholder="Material, warranty, contractor">${esc(draft.roofNotes||'')}</textarea></div>
+  <div class="field"><label>Other profile notes</label><textarea oninput="updateDraft('profileNotes',this.value)">${esc(draft.profileNotes||'')}</textarea></div>`;
 }
 
 function unitForm(){
@@ -1235,6 +1455,29 @@ function unitForm(){
     <div class="field"><label>Beds</label><input type="number" value="${draft.beds}" oninput="updateDraftNum('beds',this.value)"></div>
     <div class="field"><label>Baths</label><input type="number" step="0.5" value="${draft.baths}" oninput="updateDraftNum('baths',this.value)"></div>
     <div class="field"><label>Sqft</label><input type="number" value="${draft.sqft}" oninput="updateDraftNum('sqft',this.value)"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Wall color</label><input value="${esc(draft.wallColor||'')}" oninput="updateDraft('wallColor',this.value)" placeholder="Brand + code"></div>
+    <div class="field"><label>Faceplate color</label><input value="${esc(draft.faceplateColor||'')}" oninput="updateDraft('faceplateColor',this.value)"></div>
+  </div>
+  <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
+}
+
+function applianceForm(){
+  const commonTypes = ['Stove','Refrigerator','Dishwasher','Microwave','Washer','Dryer','Water Heater','HVAC','Other'];
+  return `
+  <div class="field"><label>Type</label>
+    <select onchange="updateDraft('type',this.value)">
+      ${commonTypes.map(t=>`<option value="${t}" ${draft.type===t?'selected':''}>${t}</option>`).join('')}
+    </select>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Make</label><input value="${esc(draft.make||'')}" oninput="updateDraft('make',this.value)"></div>
+    <div class="field"><label>Model</label><input value="${esc(draft.model||'')}" oninput="updateDraft('model',this.value)"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Serial number</label><input value="${esc(draft.serialNumber||'')}" oninput="updateDraft('serialNumber',this.value)"></div>
+    <div class="field"><label>Install date</label><input type="date" value="${draft.installDate||''}" oninput="updateDraft('installDate',this.value)"></div>
   </div>
   <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
 }
@@ -1392,6 +1635,35 @@ function tenantCommForm(){
   <div class="field"><label>Follow-up date (optional)</label><input type="date" value="${draft.followUpDate||''}" oninput="updateDraft('followUpDate',this.value)"></div>`;
 }
 
+function timeEntryForm(){
+  const bOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${draft.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  const units = draft.buildingId ? unitsForBuilding(draft.buildingId) : [];
+  const uOpts = units.map(u=>`<option value="${u.id}" ${draft.unitId===u.id?'selected':''}>${esc(u.number)}</option>`).join('');
+  const activities = [
+    ['admin','Administrative'], ['leasing','Leasing / finding tenants'], ['turnover','Unit turnover'],
+    ['repairs','Repairs'], ['maintenance','Maintenance'], ['other','Other'],
+  ];
+  return `
+  <div class="field-row">
+    <div class="field"><label>Building</label><select onchange="updateDraft('buildingId',this.value);updateDraft('unitId','');reRenderModalBody()"><option value="">— select —</option>${bOpts}</select></div>
+    <div class="field"><label>Unit (optional)</label><select onchange="updateDraft('unitId',this.value)"><option value="">— whole building —</option>${uOpts}</select></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Date</label><input type="date" value="${draft.date}" oninput="updateDraft('date',this.value)"></div>
+    <div class="field"><label>Activity</label>
+      <select onchange="updateDraft('activity',this.value)">
+        ${activities.map(([v,l])=>`<option value="${v}" ${draft.activity===v?'selected':''}>${l}</option>`).join('')}
+      </select>
+    </div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Hours</label><input type="number" step="0.25" value="${draft.hours}" oninput="updateDraftNum('hours',this.value)"></div>
+    <div class="field"><label>Rate ($/hr)</label><input type="number" step="0.01" value="${draft.rate}" oninput="updateDraftNum('rate',this.value)"></div>
+  </div>
+  <div class="field"><label>Description</label><input value="${esc(draft.description||'')}" oninput="updateDraft('description',this.value)" placeholder="e.g. Showed unit 2B to prospective tenant"></div>
+  <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
+}
+
 /* =========================================================
    CONFIRM / DELETE
    ========================================================= */
@@ -1421,7 +1693,8 @@ function renderConfirm(){
 const DELETE_ENTITY_MAP = {
   deleteBuilding:'building', deleteUnit:'unit', deleteOwner:'owner', deleteTenant:'tenant',
   deleteLease:'lease', deleteLedgerEntry:'ledgerEntry', deleteMaintenance:'maintenance',
-  deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm'
+  deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm',
+  deleteAppliance:'appliance', deleteTimeEntry:'timeEntry'
 };
 async function runConfirmedAction(){
   const {action, id} = confirmState;
