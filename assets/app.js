@@ -251,8 +251,8 @@ function currentNav(){
     .filter(n => !n.children || n.children.length > 0);
 }
 
-let navCollapsed = {}; // group id -> true once the user collapses it; absent/false = expanded
-function toggleNavGroup(gid){ navCollapsed[gid] = !navCollapsed[gid]; render(); }
+let navExpanded = {}; // group id -> true once the user expands it; absent/false = collapsed by default
+function toggleNavGroup(gid){ navExpanded[gid] = !navExpanded[gid]; render(); }
 
 function setTab(t){
   currentTab=t;
@@ -282,7 +282,7 @@ function renderSidebar(){
     const num = `<span class="nav-num">${String(i+1).padStart(2,'0')}</span>`;
     if(n.children){
       const hasActiveChild = n.children.some(c=>c.id===currentTab);
-      const expanded = hasActiveChild || !navCollapsed[n.id];
+      const expanded = hasActiveChild || !!navExpanded[n.id];
       const kids = n.children.map(c=>`
         <div class="nav-item nav-item-child ${currentTab===c.id?'active':''}" role="tab" tabindex="0" aria-selected="${currentTab===c.id}" onclick="setTab('${c.id}')" onkeydown="onActivateKey(event,()=>setTab('${c.id}'))">
           <span>${c.label}</span>
