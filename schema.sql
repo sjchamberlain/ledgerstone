@@ -64,6 +64,15 @@ CREATE TABLE tenants (
   phone VARCHAR(50)
 ) ENGINE=InnoDB;
 
+CREATE TABLE vendors (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(150) NOT NULL,
+  trade VARCHAR(100),
+  email VARCHAR(150),
+  phone VARCHAR(50),
+  notes TEXT
+) ENGINE=InnoDB;
+
 CREATE TABLE leases (
   id INT AUTO_INCREMENT PRIMARY KEY,
   unit_id INT NOT NULL,

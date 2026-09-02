@@ -5,7 +5,7 @@
    boundary: pm_require_admin() in api.php is what actually blocks writes.
    ========================================================= */
 let DATA = {
-  buildings: [], units: [], owners: [], tenants: [], leases: [],
+  buildings: [], units: [], owners: [], tenants: [], vendors: [], leases: [],
   ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: [],
   appliances: [], timeEntries: []
 };
@@ -66,6 +66,7 @@ function pm_normalize_ids(data){
   (data.units||[]).forEach(u=>{ u.id=s(u.id); u.buildingId=s(u.buildingId); });
   (data.owners||[]).forEach(o=>{ o.id=s(o.id); });
   (data.tenants||[]).forEach(t=>{ t.id=s(t.id); });
+  (data.vendors||[]).forEach(v=>{ v.id=s(v.id); });
   (data.leases||[]).forEach(l=>{ l.id=s(l.id); l.unitId=s(l.unitId); l.tenantId=s(l.tenantId); });
   (data.ledger||[]).forEach(e=>{ e.id=s(e.id); e.leaseId=s(e.leaseId); });
   (data.maintenance||[]).forEach(m=>{ m.id=s(m.id); m.buildingId=s(m.buildingId); m.unitId=s(m.unitId); });
@@ -112,6 +113,7 @@ function getBuilding(id){ return DATA.buildings.find(b=>b.id===id); }
 function getUnit(id){ return DATA.units.find(u=>u.id===id); }
 function getOwner(id){ return DATA.owners.find(o=>o.id===id); }
 function getTenant(id){ return DATA.tenants.find(t=>t.id===id); }
+function getVendor(id){ return DATA.vendors.find(v=>v.id===id); }
 function getLease(id){ return DATA.leases.find(l=>l.id===id); }
 
 function unitsForBuilding(bid){ return DATA.units.filter(u=>u.buildingId===bid); }
@@ -215,26 +217,42 @@ let filters = { maintBuilding:'', ownerBillBuilding:'', commOwner:'', commBuildi
 let viewingOwnerId = null;
 let viewingTenantId = null;
 let viewingUnitId = null;
-let peopleSubTab = 'owners'; // 'owners' | 'tenants' — sub-view within the merged People tab
 let ownerReportState = { ownerId:'', start:'', end:'' , building:''};
 let arrearsReportState = { asOf: todayISO(), building:'' };
 let feeGenState = { buildingId:'', month: new Date().toISOString().slice(0,7) };
 let timecardFilters = { building:'', activity:'' };
 let timecardReportState = { building:'', start:'', end:'' };
 
-const NAV_BASE = [
+const NAV_TREE = [
   {id:'dashboard', label:'Dashboard'},
-  {id:'properties', label:'Properties'},
-  {id:'people', label:'People'},
-  {id:'leases', label:'Leases'},
+  {id:'properties-group', label:'Properties', children:[
+    {id:'properties', label:'Units'},
+    {id:'leases', label:'Leases'},
+    {id:'maintenance', label:'Maintenance'},
+  ]},
+  {id:'people-group', label:'People', children:[
+    {id:'owners', label:'Owners'},
+    {id:'tenants', label:'Tenants'},
+    {id:'vendors', label:'Vendors'},
+  ]},
   {id:'ledger', label:'Ledger'},
-  {id:'maintenance', label:'Maintenance'},
   {id:'billing', label:'Owner Billing'},
   {id:'communications', label:'Communications'},
-  {id:'reports', label:'Reports'}
+  {id:'management-group', label:'Management', children:[
+    {id:'reports', label:'Reports'},
+    {id:'timecards', label:'Timecards', adminOnly:true},
+    {id:'users', label:'Users', adminOnly:true},
+  ]},
 ];
-const NAV_ADMIN_ONLY = [{id:'timecards', label:'Timecards'}, {id:'users', label:'Users'}];
-function currentNav(){ return isAdmin() ? [...NAV_BASE, ...NAV_ADMIN_ONLY] : NAV_BASE; }
+function currentNav(){
+  const admin = isAdmin();
+  return NAV_TREE
+    .map(n => n.children ? {...n, children: n.children.filter(c => admin || !c.adminOnly)} : n)
+    .filter(n => !n.children || n.children.length > 0);
+}
+
+let navCollapsed = {}; // group id -> true once the user collapses it; absent/false = expanded
+function toggleNavGroup(gid){ navCollapsed[gid] = !navCollapsed[gid]; render(); }
 
 function setTab(t){
   currentTab=t;
@@ -260,10 +278,26 @@ function renderReloadBar(){
 
 function renderSidebar(){
   const nav = currentNav();
-  let items = nav.map((n,i)=>`
-    <div class="nav-item ${currentTab===n.id?'active':''}" role="tab" tabindex="0" aria-selected="${currentTab===n.id}" onclick="setTab('${n.id}')" onkeydown="onActivateKey(event,()=>setTab('${n.id}'))">
-      <span class="nav-num">${String(i+1).padStart(2,'0')}</span><span>${n.label}</span>
-    </div>`).join('');
+  let items = nav.map((n,i)=>{
+    const num = `<span class="nav-num">${String(i+1).padStart(2,'0')}</span>`;
+    if(n.children){
+      const hasActiveChild = n.children.some(c=>c.id===currentTab);
+      const expanded = hasActiveChild || !navCollapsed[n.id];
+      const kids = n.children.map(c=>`
+        <div class="nav-item nav-item-child ${currentTab===c.id?'active':''}" role="tab" tabindex="0" aria-selected="${currentTab===c.id}" onclick="setTab('${c.id}')" onkeydown="onActivateKey(event,()=>setTab('${c.id}'))">
+          <span>${c.label}</span>
+        </div>`).join('');
+      return `<div class="nav-group">
+        <div class="nav-item nav-group-head" role="button" tabindex="0" aria-expanded="${expanded}" onclick="toggleNavGroup('${n.id}')" onkeydown="onActivateKey(event,()=>toggleNavGroup('${n.id}'))">
+          ${num}<span>${n.label}</span><span class="nav-caret ${expanded?'open':''}">&rsaquo;</span>
+        </div>
+        <div class="nav-children" ${expanded?'':'style="display:none;"'}>${kids}</div>
+      </div>`;
+    }
+    return `<div class="nav-item ${currentTab===n.id?'active':''}" role="tab" tabindex="0" aria-selected="${currentTab===n.id}" onclick="setTab('${n.id}')" onkeydown="onActivateKey(event,()=>setTab('${n.id}'))">
+      ${num}<span>${n.label}</span>
+    </div>`;
+  }).join('');
   return `<div class="sidebar">
     <div class="brand">
       <div class="brand-mark">Ledgerstone</div>
@@ -281,7 +315,9 @@ function renderTab(){
   switch(currentTab){
     case 'dashboard': return renderDashboard();
     case 'properties': return renderProperties();
-    case 'people': return renderPeople();
+    case 'owners': return renderOwners();
+    case 'tenants': return renderTenants();
+    case 'vendors': return renderVendors();
     case 'leases': return renderLeases();
     case 'ledger': return renderLedger();
     case 'maintenance': return renderMaintenance();
@@ -468,23 +504,6 @@ function renderUnitDetail(id){
 }
 
 /* =========================================================
-   PEOPLE (Owners + Tenants)
-   ========================================================= */
-function setPeopleSubTab(sub){
-  peopleSubTab = sub;
-  viewingOwnerId = null;
-  viewingTenantId = null;
-  render();
-}
-function renderPeople(){
-  const switcher = `<div class="row" style="margin-bottom:16px;">
-    <button class="btn ${peopleSubTab==='owners'?'':'btn-ghost'} btn-sm" onclick="setPeopleSubTab('owners')">Owners</button>
-    <button class="btn ${peopleSubTab==='tenants'?'':'btn-ghost'} btn-sm" onclick="setPeopleSubTab('tenants')">Tenants</button>
-  </div>`;
-  return switcher + (peopleSubTab==='tenants' ? renderTenants() : renderOwners());
-}
-
-/* =========================================================
    OWNERS
    ========================================================= */
 function viewOwner(id){ viewingOwnerId = id; render(); }
@@ -660,6 +679,27 @@ function renderTenantDetail(id){
   <div class="panel">
     <h3>Communications</h3>
     ${commRows? `<table><thead><tr><th>Date</th><th>Method</th><th>Subject</th><th>Follow-up</th></tr></thead><tbody>${commRows}</tbody></table>` : `<div class="empty">No communications logged yet.</div>`}
+  </div>`;
+}
+
+/* =========================================================
+   VENDORS
+   ========================================================= */
+function renderVendors(){
+  const rows = DATA.vendors.map(v=>`<tr>
+    <td>${esc(v.name)}</td><td>${esc(v.trade||'—')}</td><td>${esc(v.email||'—')}</td><td>${esc(v.phone||'—')}</td>
+    <td class="row" style="justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('vendor','edit','${v.id}')">Edit</button>
+      <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete vendor ${esc(v.name)}?','deleteVendor','${v.id}')">Delete</button>
+    </td>
+  </tr>`).join('');
+  return `
+  <div class="page-head">
+    <div><h1 class="page-title">Vendors</h1><div class="page-sub">Contractors and service providers you work with</div></div>
+    <button class="btn admin-only" onclick="openModal('vendor','add')">+ Add Vendor</button>
+  </div>
+  <div class="panel">
+    ${DATA.vendors.length? `<table><thead><tr><th>Name</th><th>Trade</th><th>Email</th><th>Phone</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No vendors yet.</div>`}
   </div>`;
 }
 
@@ -1293,6 +1333,9 @@ function openModal(type, mode, id, extra){
     case 'tenant':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getTenant(id))) : {id:null, name:'', email:'', phone:''};
       break;
+    case 'vendor':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getVendor(id))) : {id:null, name:'', trade:'', email:'', phone:'', notes:''};
+      break;
     case 'lease':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getLease(id))) : {id:null, unitId:'', tenantId:'', startDate: todayISO(), endDate:'', rentAmount:0, depositAmount:0, billingDay:1, status:'active'};
       break;
@@ -1380,6 +1423,7 @@ function renderModal(){
     case 'unit': title = modal.mode==='add'?'Add Unit':'Edit Unit'; body = unitForm(); break;
     case 'owner': title = modal.mode==='add'?'Add Owner':'Edit Owner'; body = ownerForm(); break;
     case 'tenant': title = modal.mode==='add'?'Add Tenant':'Edit Tenant'; body = tenantForm(); break;
+    case 'vendor': title = modal.mode==='add'?'Add Vendor':'Edit Vendor'; body = vendorForm(); break;
     case 'lease': title = modal.mode==='add'?'Add Lease':'Edit Lease'; body = leaseForm(); break;
     case 'maintenance': title = modal.mode==='add'?'Add Maintenance Request':'Edit Maintenance Request'; body = maintenanceForm(); break;
     case 'ledgerCharge': title = 'Add Charge'; body = ledgerEntryForm(); break;
@@ -1493,6 +1537,17 @@ function tenantForm(){
   <div class="field"><label>Name</label><input value="${esc(draft.name)}" oninput="updateDraft('name',this.value)"></div>
   <div class="field"><label>Email</label><input value="${esc(draft.email)}" oninput="updateDraft('email',this.value)"></div>
   <div class="field"><label>Phone</label><input value="${esc(draft.phone)}" oninput="updateDraft('phone',this.value)"></div>`;
+}
+
+function vendorForm(){
+  return `
+  <div class="field"><label>Name</label><input value="${esc(draft.name)}" oninput="updateDraft('name',this.value)"></div>
+  <div class="field"><label>Trade / specialty</label><input value="${esc(draft.trade||'')}" oninput="updateDraft('trade',this.value)" placeholder="e.g. Plumbing, Electrical, Landscaping"></div>
+  <div class="field-row">
+    <div class="field"><label>Email</label><input value="${esc(draft.email||'')}" oninput="updateDraft('email',this.value)"></div>
+    <div class="field"><label>Phone</label><input value="${esc(draft.phone||'')}" oninput="updateDraft('phone',this.value)"></div>
+  </div>
+  <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
 }
 
 function leaseForm(){
@@ -1691,7 +1746,7 @@ function renderConfirm(){
 // Maps the legacy per-row action names (kept in the onclick attributes above)
 // to the entity name api.php expects for a delete call.
 const DELETE_ENTITY_MAP = {
-  deleteBuilding:'building', deleteUnit:'unit', deleteOwner:'owner', deleteTenant:'tenant',
+  deleteBuilding:'building', deleteUnit:'unit', deleteOwner:'owner', deleteTenant:'tenant', deleteVendor:'vendor',
   deleteLease:'lease', deleteLedgerEntry:'ledgerEntry', deleteMaintenance:'maintenance',
   deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm',
   deleteAppliance:'appliance', deleteTimeEntry:'timeEntry'

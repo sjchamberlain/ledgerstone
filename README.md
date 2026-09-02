@@ -135,6 +135,9 @@ once via phpMyAdmin's SQL tab (Export your database first, as always
 before a schema change). A fresh install via the current `schema.sql`
 already has everything and doesn't need this file.
 
+If your database predates the Vendors directory, also run
+`migrations/003_vendors.sql` the same way.
+
 ## Building/unit profiles, appliances, and timecards
 
 - **Properties** → a building's edit form now has roof/electrical/exterior

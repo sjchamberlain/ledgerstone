@@ -162,6 +162,8 @@ function pm_get_all(PDO $pdo, array $user): array {
   $ledgerRows = pm_fetch_ledger($pdo, $leaseIdList, $isAdmin);
   $maintRows = pm_fetch_maintenance($pdo, $buildingIdList, $unitIdList, $isAdmin);
 
+  $vendorRows = pm_fetch_vendors($pdo);
+
   if ($isAdmin) {
     $ownerRows = pm_fetch_owners($pdo, null);
     $ownerLedgerRows = pm_fetch_owner_ledger($pdo, null, null);
@@ -195,6 +197,7 @@ function pm_get_all(PDO $pdo, array $user): array {
     'units' => $unitRows,
     'owners' => $ownerRows,
     'tenants' => $tenants,
+    'vendors' => $vendorRows,
     'leases' => $leaseRows,
     'ledger' => $ledgerRows,
     'maintenance' => $maintRows,
@@ -294,6 +297,14 @@ function pm_fetch_owners(PDO $pdo, ?array $ownerIds): array {
   $stmt = $pdo->prepare($sql);
   $stmt->execute($params);
   return array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'email' => $r['email'], 'phone' => $r['phone']], $stmt->fetchAll());
+}
+
+function pm_fetch_vendors(PDO $pdo): array {
+  $stmt = $pdo->query('SELECT * FROM vendors');
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'name' => $r['name'], 'trade' => $r['trade'],
+    'email' => $r['email'], 'phone' => $r['phone'], 'notes' => $r['notes'],
+  ], $stmt->fetchAll());
 }
 
 function pm_fetch_tenants(PDO $pdo, array $tenantIds, bool $isAdmin): array {
@@ -492,6 +503,17 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
       }
       return $id;
     }
+    case 'vendor': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['name'], $r['trade'] ?? '', $r['email'] ?? '', $r['phone'] ?? '', $r['notes'] ?? ''];
+      if ($id) {
+        $pdo->prepare('UPDATE vendors SET name=?, trade=?, email=?, phone=?, notes=? WHERE id=?')->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO vendors (name, trade, email, phone, notes) VALUES (?,?,?,?,?)')->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
     case 'lease': {
       $id = (int)($r['id'] ?? 0);
       $fields = [$r['unitId'], $r['tenantId'], $r['startDate'], $r['endDate'] ?: null, $r['rentAmount'], $r['depositAmount'], $r['billingDay'], $r['status']];
@@ -572,6 +594,7 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
 function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
   $table = [
     'building' => 'buildings', 'unit' => 'units', 'owner' => 'owners', 'tenant' => 'tenants',
+    'vendor' => 'vendors',
     'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
     'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
     'appliance' => 'appliances', 'timeEntry' => 'time_entries',
