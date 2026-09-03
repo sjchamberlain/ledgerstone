@@ -57,6 +57,28 @@ CREATE TABLE appliances (
   FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE rooms (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  unit_id INT NOT NULL,
+  name VARCHAR(100) NOT NULL,        -- e.g. Living Room, Bedroom 1, Kitchen
+  length_in DECIMAL(6,2) NULL,       -- room dimensions, inches
+  width_in DECIMAL(6,2) NULL,
+  paint_color VARCHAR(150) NULL,     -- overrides the unit's wall_color for this room, when it differs
+  notes TEXT,
+  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE room_openings (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  room_id INT NOT NULL,
+  type ENUM('door','window') NOT NULL,
+  label VARCHAR(100) NULL,           -- e.g. "Closet door", "North window"
+  width_in DECIMAL(6,2) NULL,
+  height_in DECIMAL(6,2) NULL,
+  notes TEXT,
+  FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE tenants (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(150) NOT NULL,
