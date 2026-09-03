@@ -118,6 +118,32 @@ This runs via a cPanel cron job, not by anyone having the app open:
    rent-due check now") — handy right after adding a new lease with a
    billing day earlier than today, so it doesn't wait for tomorrow's cron.
 
+## Automatic deploy
+
+By default, a merge to `main` only updates GitHub — cPanel's copy stays on
+whatever was last deployed until someone opens **Git Version Control** and
+clicks "Update from Remote" then "Deploy HEAD Commit". `cron_deploy.sh` runs
+those two steps on a schedule instead:
+
+1. cPanel → **Git Version Control** → open this repo → confirm the
+   **Repository Path** shown there. If it isn't
+   `/home/murphserv/repositories/ledgerstone`, edit `REPO_DIR` at the top of
+   `cron_deploy.sh` to match, then commit and push that change (or edit it
+   directly on the server — cron reads the file at run time, not a deployed
+   copy of it).
+2. cPanel → **Cron Jobs** → Common Settings → **Every 10 minutes** (or your
+   own schedule — it's a no-op when `main` hasn't moved).
+3. Command:
+   ```
+   /bin/bash /home/murphserv/repositories/ledgerstone/cron_deploy.sh >> /home/murphserv/logs/deploy.log 2>&1
+   ```
+   Point this at wherever `cron_deploy.sh` actually lives (the repo checkout
+   from step 1, not `public_html`), and create the `logs` directory first if
+   it doesn't exist. Drop the log redirect if you'd rather cPanel email you
+   the output of every run.
+4. It exits quietly with nothing deployed when there's nothing new; it only
+   prints (and deploys) when `main` has moved since the last run.
+
 ## Backups
 
 This is now a real database, not a browser-local file — cPanel's
