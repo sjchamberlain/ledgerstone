@@ -138,13 +138,22 @@ already has everything and doesn't need this file.
 If your database predates the Vendors directory, also run
 `migrations/003_vendors.sql` the same way.
 
+If your database predates per-room measurements, also run
+`migrations/004_rooms.sql` the same way.
+
 ## Building/unit profiles, appliances, and timecards
 
 - **Properties** → a building's edit form now has roof/electrical/exterior
   paint fields. Click a unit's number (or its **Profile** button) to open
-  its profile page: wall color, faceplate color, and a repeatable
-  appliance list (type, make, model, serial #, install date — age is
-  computed from that date).
+  its profile page: wall color, faceplate color, a repeatable appliance
+  list (type, make, model, serial #, install date — age is computed from
+  that date), and a repeatable room list. Add a room while the unit is
+  vacant to record its size, an optional paint color override (when a
+  room isn't the unit's standard color), and a list of door/window
+  measurements (width × height in inches) — everything needed to order
+  custom blinds, screens, or doors without a return trip. Use the
+  profile page's **Print** button to hand an owner a printout of all of
+  it if they ever move on from you.
 - **Timecards** (staff only) logs hours against a building (and
   optionally a specific unit) under one of six activities (Administrative,
   Leasing, Turnover, Repairs, Maintenance, Other), each with an hourly

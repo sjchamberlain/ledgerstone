@@ -7,7 +7,7 @@
 let DATA = {
   buildings: [], units: [], owners: [], tenants: [], vendors: [], leases: [],
   ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: [],
-  appliances: [], timeEntries: []
+  appliances: [], rooms: [], roomOpenings: [], timeEntries: []
 };
 let CURRENT_USER = window.PM_USER || {role:'owner'};
 let CSRF_TOKEN = window.PM_CSRF || '';
@@ -74,6 +74,8 @@ function pm_normalize_ids(data){
   (data.communications||[]).forEach(c=>{ c.id=s(c.id); c.ownerId=s(c.ownerId); c.buildingId=s(c.buildingId); });
   (data.tenantCommunications||[]).forEach(c=>{ c.id=s(c.id); c.tenantId=s(c.tenantId); c.leaseId=s(c.leaseId); });
   (data.appliances||[]).forEach(a=>{ a.id=s(a.id); a.unitId=s(a.unitId); });
+  (data.rooms||[]).forEach(r=>{ r.id=s(r.id); r.unitId=s(r.unitId); });
+  (data.roomOpenings||[]).forEach(o=>{ o.id=s(o.id); o.roomId=s(o.roomId); });
   (data.timeEntries||[]).forEach(t=>{ t.id=s(t.id); t.buildingId=s(t.buildingId); t.unitId=s(t.unitId); t.userId=s(t.userId); });
   if(data.currentUser) data.currentUser.ownerId = s(data.currentUser.ownerId);
 }
@@ -457,6 +459,14 @@ function renderProperties(){
 /* =========================================================
    UNIT PROFILE (wall/faceplate color, appliances)
    ========================================================= */
+function openingLabel(o){
+  return o.label || (o.type==='door'?'Door':'Window');
+}
+function dimText(w,h){
+  if(w==null && h==null) return '—';
+  if(w!=null && h!=null) return `${w}" × ${h}"`;
+  return `${w!=null?w+'"':'?'} × ${h!=null?h+'"':'?'}`;
+}
 function renderUnitDetail(id){
   const u = getUnit(id);
   if(!u){ viewingUnitId=null; return renderProperties(); }
@@ -468,21 +478,55 @@ function renderUnitDetail(id){
       <td>${esc(a.type)}</td><td>${esc(a.make||'—')}</td><td>${esc(a.model||'—')}</td><td>${esc(a.serialNumber||'—')}</td>
       <td>${a.installDate? fmtDate(a.installDate) : '—'}</td>
       <td>${age===null? '—' : (age===0?'<1 yr':age+' yr')}</td>
-      <td class="row" style="justify-content:flex-end;">
+      <td class="row no-print" style="justify-content:flex-end;">
         <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('appliance','edit','${a.id}')">Edit</button>
         <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this appliance record?','deleteAppliance','${a.id}')">Delete</button>
       </td>
     </tr>`;
   }).join('');
 
+  const rooms = DATA.rooms.filter(r=>r.unitId===u.id);
+  const roomBlocks = rooms.map(r=>{
+    const openings = DATA.roomOpenings.filter(o=>o.roomId===r.id);
+    const openingRows = openings.map(o=>`<tr>
+      <td>${o.type==='door'?'Door':'Window'}</td><td>${esc(openingLabel(o))}</td><td>${dimText(o.widthIn,o.heightIn)}</td>
+      <td>${esc(o.notes||'—')}</td>
+      <td class="row no-print" style="justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('roomOpening','edit','${o.id}')">Edit</button>
+        <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this ${o.type} measurement?','deleteRoomOpening','${o.id}')">Delete</button>
+      </td>
+    </tr>`).join('');
+    return `<div class="room-block" style="border-top:1px solid var(--line);padding:14px 0;">
+      <div class="page-head" style="margin-bottom:8px;">
+        <div>
+          <h4 style="margin:0;">${esc(r.name)}</h4>
+          <div class="subtle">
+            ${r.lengthIn||r.widthIn? `Size: ${dimText(r.lengthIn,r.widthIn)}` : 'Size not recorded'}
+            ${r.paintColor? ` &nbsp;·&nbsp; Paint: ${esc(r.paintColor)}` : ''}
+          </div>
+        </div>
+        <div class="row no-print">
+          <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('roomOpening','add',null,'${r.id}')">+ Door/Window</button>
+          <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('room','edit','${r.id}')">Edit</button>
+          <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete ${esc(r.name)} and its door/window measurements?','deleteRoom','${r.id}')">Delete</button>
+        </div>
+      </div>
+      ${r.notes? `<div class="subtle" style="margin-bottom:8px;">${esc(r.notes)}</div>` : ''}
+      ${openings.length? `<table><thead><tr><th>Type</th><th>Label</th><th>Size (W × H)</th><th>Notes</th><th></th></tr></thead><tbody>${openingRows}</tbody></table>` : `<div class="empty">No doors or windows measured for this room yet.</div>`}
+    </div>`;
+  }).join('');
+
   return `
   <div class="page-head">
     <div>
-      <span class="mini-link" onclick="viewingUnitId=null;render();">← Back to properties</span>
+      <span class="mini-link no-print" onclick="viewingUnitId=null;render();">← Back to properties</span>
       <h1 class="page-title" style="margin-top:6px;">${esc(b?b.name:'?')} · Unit ${esc(u.number)}</h1>
       <div class="page-sub">${esc(u.beds)} bed / ${esc(u.baths)} bath${u.sqft?' · '+esc(u.sqft)+' sqft':''}</div>
     </div>
-    <button class="btn btn-ghost admin-only" onclick="openModal('unit','edit','${u.id}')">Edit unit</button>
+    <div class="row no-print">
+      <button class="btn btn-ghost" onclick="window.print()">Print</button>
+      <button class="btn btn-ghost admin-only" onclick="openModal('unit','edit','${u.id}')">Edit unit</button>
+    </div>
   </div>
 
   <div class="panel">
@@ -496,8 +540,16 @@ function renderUnitDetail(id){
 
   <div class="panel">
     <div class="page-head" style="margin-bottom:12px;">
+      <h3 style="margin:0;">Rooms &amp; measurements</h3>
+      <button class="btn btn-ghost btn-sm admin-only no-print" onclick="openModal('room','add',null,'${u.id}')">+ Add Room</button>
+    </div>
+    ${roomBlocks || `<div class="empty">No rooms logged yet. Add each room while the unit is vacant to capture size, paint color, and door/window measurements.</div>`}
+  </div>
+
+  <div class="panel">
+    <div class="page-head" style="margin-bottom:12px;">
       <h3 style="margin:0;">Appliances</h3>
-      <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('appliance','add',null,'${u.id}')">+ Add Appliance</button>
+      <button class="btn btn-ghost btn-sm admin-only no-print" onclick="openModal('appliance','add',null,'${u.id}')">+ Add Appliance</button>
     </div>
     ${appliances.length? `<table><thead><tr><th>Type</th><th>Make</th><th>Model</th><th>Serial #</th><th>Installed</th><th>Age</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No appliances logged for this unit yet.</div>`}
   </div>`;
@@ -1327,6 +1379,12 @@ function openModal(type, mode, id, extra){
     case 'timeEntry':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.timeEntries.find(t=>t.id===id))) : {id:null, buildingId: extra||'', unitId:'', userId: CURRENT_USER.id!=null?String(CURRENT_USER.id):'', date: todayISO(), activity:'admin', hours:1, rate: CURRENT_USER.hourlyRate||0, description:'', notes:''};
       break;
+    case 'room':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.rooms.find(r=>r.id===id))) : {id:null, unitId: extra||'', name:'', lengthIn:'', widthIn:'', paintColor:'', notes:''};
+      break;
+    case 'roomOpening':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.roomOpenings.find(o=>o.id===id))) : {id:null, roomId: extra||'', type:'window', label:'', widthIn:'', heightIn:'', notes:''};
+      break;
     case 'owner':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getOwner(id))) : {id:null, name:'', email:'', phone:''};
       break;
@@ -1432,6 +1490,8 @@ function renderModal(){
     case 'communication': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = communicationForm(); break;
     case 'tenantComm': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = tenantCommForm(); break;
     case 'appliance': title = modal.mode==='add'?'Add Appliance':'Edit Appliance'; body = applianceForm(); break;
+    case 'room': title = modal.mode==='add'?'Add Room':'Edit Room'; body = roomForm(); break;
+    case 'roomOpening': title = modal.mode==='add'?(draft.type==='door'?'Add Door':'Add Window'):'Edit Door/Window'; body = roomOpeningForm(); break;
     case 'timeEntry': title = modal.mode==='add'?'Log Time':'Edit Time Entry'; body = timeEntryForm(); break;
     case 'user': title = modal.mode==='add'?'Add User':'Edit User'; body = userForm(); break;
     case 'changePassword': title = 'Change Password'; body = changePasswordForm(); break;
@@ -1522,6 +1582,33 @@ function applianceForm(){
   <div class="field-row">
     <div class="field"><label>Serial number</label><input value="${esc(draft.serialNumber||'')}" oninput="updateDraft('serialNumber',this.value)"></div>
     <div class="field"><label>Install date</label><input type="date" value="${draft.installDate||''}" oninput="updateDraft('installDate',this.value)"></div>
+  </div>
+  <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
+}
+
+function roomForm(){
+  return `
+  <div class="field"><label>Room name</label><input value="${esc(draft.name)}" oninput="updateDraft('name',this.value)" placeholder="e.g. Living Room, Bedroom 1, Kitchen"></div>
+  <div class="field-row">
+    <div class="field"><label>Length (in)</label><input type="number" step="0.25" value="${draft.lengthIn}" oninput="updateDraftNum('lengthIn',this.value)"></div>
+    <div class="field"><label>Width (in)</label><input type="number" step="0.25" value="${draft.widthIn}" oninput="updateDraftNum('widthIn',this.value)"></div>
+  </div>
+  <div class="field"><label>Paint color</label><input value="${esc(draft.paintColor||'')}" oninput="updateDraft('paintColor',this.value)" placeholder="Brand + code — leave blank to use the unit's wall color"></div>
+  <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
+}
+
+function roomOpeningForm(){
+  return `
+  <div class="field"><label>Type</label>
+    <select onchange="updateDraft('type',this.value)">
+      <option value="window" ${draft.type==='window'?'selected':''}>Window</option>
+      <option value="door" ${draft.type==='door'?'selected':''}>Door</option>
+    </select>
+  </div>
+  <div class="field"><label>Label</label><input value="${esc(draft.label||'')}" oninput="updateDraft('label',this.value)" placeholder="e.g. North window, Closet door"></div>
+  <div class="field-row">
+    <div class="field"><label>Width (in)</label><input type="number" step="0.125" value="${draft.widthIn}" oninput="updateDraftNum('widthIn',this.value)"></div>
+    <div class="field"><label>Height (in)</label><input type="number" step="0.125" value="${draft.heightIn}" oninput="updateDraftNum('heightIn',this.value)"></div>
   </div>
   <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
 }
@@ -1749,7 +1836,8 @@ const DELETE_ENTITY_MAP = {
   deleteBuilding:'building', deleteUnit:'unit', deleteOwner:'owner', deleteTenant:'tenant', deleteVendor:'vendor',
   deleteLease:'lease', deleteLedgerEntry:'ledgerEntry', deleteMaintenance:'maintenance',
   deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm',
-  deleteAppliance:'appliance', deleteTimeEntry:'timeEntry'
+  deleteAppliance:'appliance', deleteTimeEntry:'timeEntry',
+  deleteRoom:'room', deleteRoomOpening:'roomOpening'
 };
 async function runConfirmedAction(){
   const {action, id} = confirmState;

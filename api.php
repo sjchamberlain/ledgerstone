@@ -181,6 +181,8 @@ function pm_get_all(PDO $pdo, array $user): array {
   }
 
   $applianceRows = pm_fetch_appliances($pdo, $unitIdList);
+  $roomRows = pm_fetch_rooms($pdo, $unitIdList);
+  $roomOpeningRows = pm_fetch_room_openings($pdo, array_column($roomRows, 'id'));
   // Time entries record internal labor cost — admin/staff only, not shown to owner logins.
   $timeEntryRows = $isAdmin ? pm_fetch_time_entries($pdo, null) : [];
 
@@ -205,6 +207,8 @@ function pm_get_all(PDO $pdo, array $user): array {
     'communications' => $commRows,
     'tenantCommunications' => $tenantCommRows,
     'appliances' => $applianceRows,
+    'rooms' => $roomRows,
+    'roomOpenings' => $roomOpeningRows,
     'timeEntries' => $timeEntryRows,
   ];
 }
@@ -265,6 +269,30 @@ function pm_fetch_appliances(PDO $pdo, array $unitIds): array {
   return array_map(fn($r) => [
     'id' => (int)$r['id'], 'unitId' => (int)$r['unit_id'], 'type' => $r['type'], 'make' => $r['make'],
     'model' => $r['model'], 'serialNumber' => $r['serial_number'], 'installDate' => $r['install_date'],
+    'notes' => $r['notes'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_rooms(PDO $pdo, array $unitIds): array {
+  $sql = 'SELECT * FROM rooms WHERE unit_id IN (' . pm_in_clause($unitIds) . ')';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($unitIds ?: [0]);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'unitId' => (int)$r['unit_id'], 'name' => $r['name'],
+    'lengthIn' => $r['length_in'] !== null ? (float)$r['length_in'] : null,
+    'widthIn' => $r['width_in'] !== null ? (float)$r['width_in'] : null,
+    'paintColor' => $r['paint_color'], 'notes' => $r['notes'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_room_openings(PDO $pdo, array $roomIds): array {
+  $sql = 'SELECT * FROM room_openings WHERE room_id IN (' . pm_in_clause($roomIds) . ')';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($roomIds ?: [0]);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'roomId' => (int)$r['room_id'], 'type' => $r['type'], 'label' => $r['label'],
+    'widthIn' => $r['width_in'] !== null ? (float)$r['width_in'] : null,
+    'heightIn' => $r['height_in'] !== null ? (float)$r['height_in'] : null,
     'notes' => $r['notes'],
   ], $stmt->fetchAll());
 }
@@ -468,6 +496,32 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
       }
       return $id;
     }
+    case 'room': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['unitId'], $r['name'], $r['lengthIn'] ?: null, $r['widthIn'] ?: null, $r['paintColor'] ?? '', $r['notes'] ?? ''];
+      if ($id) {
+        $pdo->prepare('UPDATE rooms SET unit_id=?, name=?, length_in=?, width_in=?, paint_color=?, notes=? WHERE id=?')
+          ->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO rooms (unit_id, name, length_in, width_in, paint_color, notes) VALUES (?,?,?,?,?,?)')
+          ->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
+    case 'roomOpening': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['roomId'], $r['type'], $r['label'] ?? '', $r['widthIn'] ?: null, $r['heightIn'] ?: null, $r['notes'] ?? ''];
+      if ($id) {
+        $pdo->prepare('UPDATE room_openings SET room_id=?, type=?, label=?, width_in=?, height_in=?, notes=? WHERE id=?')
+          ->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO room_openings (room_id, type, label, width_in, height_in, notes) VALUES (?,?,?,?,?,?)')
+          ->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
     case 'timeEntry': {
       $id = (int)($r['id'] ?? 0);
       $fields = [$r['buildingId'], $r['unitId'] ?: null, $r['userId'] ?: null, $r['date'], $r['activity'], $r['hours'], $r['rate'], $r['description'] ?? '', $r['notes'] ?? ''];
@@ -598,6 +652,7 @@ function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
     'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
     'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
     'appliance' => 'appliances', 'timeEntry' => 'time_entries',
+    'room' => 'rooms', 'roomOpening' => 'room_openings',
   ][$entity] ?? null;
   if (!$table) throw new PmUserError("Unknown entity: $entity");
   $pdo->prepare("DELETE FROM $table WHERE id = ?")->execute([$id]);
