@@ -63,6 +63,13 @@ try {
       exit;
     }
 
+    if ($action === 'billStamps') {
+      pm_require_admin();
+      $result = pm_bill_stamps($pdo, $body);
+      echo json_encode($result);
+      exit;
+    }
+
     if ($action === 'generateRentDue') {
       pm_require_admin();
       $createdLeaseIds = pm_generate_due_rent($pdo);
@@ -185,6 +192,8 @@ function pm_get_all(PDO $pdo, array $user): array {
   $roomOpeningRows = pm_fetch_room_openings($pdo, array_column($roomRows, 'id'));
   // Time entries record internal labor cost — admin/staff only, not shown to owner logins.
   $timeEntryRows = $isAdmin ? pm_fetch_time_entries($pdo, null) : [];
+  // Stamp usage is an internal operations log — admin/staff only.
+  $stampLogRows = $isAdmin ? pm_fetch_stamp_log($pdo) : [];
 
   return [
     'currentUser' => [
@@ -210,6 +219,7 @@ function pm_get_all(PDO $pdo, array $user): array {
     'rooms' => $roomRows,
     'roomOpenings' => $roomOpeningRows,
     'timeEntries' => $timeEntryRows,
+    'stampLog' => $stampLogRows,
   ];
 }
 
@@ -324,14 +334,27 @@ function pm_fetch_owners(PDO $pdo, ?array $ownerIds): array {
   }
   $stmt = $pdo->prepare($sql);
   $stmt->execute($params);
-  return array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'email' => $r['email'], 'phone' => $r['phone']], $stmt->fetchAll());
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'name' => $r['name'], 'email' => $r['email'], 'phone' => $r['phone'],
+    'mailingAddress' => $r['mailing_address'],
+  ], $stmt->fetchAll());
 }
 
 function pm_fetch_vendors(PDO $pdo): array {
   $stmt = $pdo->query('SELECT * FROM vendors');
   return array_map(fn($r) => [
     'id' => (int)$r['id'], 'name' => $r['name'], 'trade' => $r['trade'],
-    'email' => $r['email'], 'phone' => $r['phone'], 'notes' => $r['notes'],
+    'email' => $r['email'], 'phone' => $r['phone'], 'address' => $r['address'], 'notes' => $r['notes'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_stamp_log(PDO $pdo): array {
+  $stmt = $pdo->query('SELECT * FROM stamp_log ORDER BY date DESC, id DESC');
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'date' => $r['date'],
+    'buildingId' => $r['building_id'] !== null ? (int)$r['building_id'] : null,
+    'ownerId' => $r['owner_id'] !== null ? (int)$r['owner_id'] : null,
+    'quantity' => (int)$r['quantity'], 'purpose' => $r['purpose'], 'billed' => (bool)$r['billed'],
   ], $stmt->fetchAll());
 }
 
@@ -535,13 +558,26 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
       }
       return $id;
     }
+    case 'stampLog': {
+      $id = (int)($r['id'] ?? 0);
+      $fields = [$r['date'], $r['buildingId'] ?: null, $r['ownerId'] ?: null, $r['quantity'] ?: 1, $r['purpose'] ?? '', !empty($r['billed']) ? 1 : 0];
+      if ($id) {
+        $pdo->prepare('UPDATE stamp_log SET date=?, building_id=?, owner_id=?, quantity=?, purpose=?, billed=? WHERE id=?')
+          ->execute([...$fields, $id]);
+      } else {
+        $pdo->prepare('INSERT INTO stamp_log (date, building_id, owner_id, quantity, purpose, billed) VALUES (?,?,?,?,?,?)')
+          ->execute($fields);
+        $id = (int)$pdo->lastInsertId();
+      }
+      return $id;
+    }
     case 'owner': {
       $id = (int)($r['id'] ?? 0);
-      $fields = [$r['name'], $r['email'] ?? '', $r['phone'] ?? ''];
+      $fields = [$r['name'], $r['email'] ?? '', $r['phone'] ?? '', $r['mailingAddress'] ?? ''];
       if ($id) {
-        $pdo->prepare('UPDATE owners SET name=?, email=?, phone=? WHERE id=?')->execute([...$fields, $id]);
+        $pdo->prepare('UPDATE owners SET name=?, email=?, phone=?, mailing_address=? WHERE id=?')->execute([...$fields, $id]);
       } else {
-        $pdo->prepare('INSERT INTO owners (name, email, phone) VALUES (?,?,?)')->execute($fields);
+        $pdo->prepare('INSERT INTO owners (name, email, phone, mailing_address) VALUES (?,?,?,?)')->execute($fields);
         $id = (int)$pdo->lastInsertId();
       }
       return $id;
@@ -559,11 +595,11 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
     }
     case 'vendor': {
       $id = (int)($r['id'] ?? 0);
-      $fields = [$r['name'], $r['trade'] ?? '', $r['email'] ?? '', $r['phone'] ?? '', $r['notes'] ?? ''];
+      $fields = [$r['name'], $r['trade'] ?? '', $r['email'] ?? '', $r['phone'] ?? '', $r['address'] ?? '', $r['notes'] ?? ''];
       if ($id) {
-        $pdo->prepare('UPDATE vendors SET name=?, trade=?, email=?, phone=?, notes=? WHERE id=?')->execute([...$fields, $id]);
+        $pdo->prepare('UPDATE vendors SET name=?, trade=?, email=?, phone=?, address=?, notes=? WHERE id=?')->execute([...$fields, $id]);
       } else {
-        $pdo->prepare('INSERT INTO vendors (name, trade, email, phone, notes) VALUES (?,?,?,?,?)')->execute($fields);
+        $pdo->prepare('INSERT INTO vendors (name, trade, email, phone, address, notes) VALUES (?,?,?,?,?,?)')->execute($fields);
         $id = (int)$pdo->lastInsertId();
       }
       return $id;
@@ -652,7 +688,7 @@ function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
     'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
     'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
     'appliance' => 'appliances', 'timeEntry' => 'time_entries',
-    'room' => 'rooms', 'roomOpening' => 'room_openings',
+    'room' => 'rooms', 'roomOpening' => 'room_openings', 'stampLog' => 'stamp_log',
   ][$entity] ?? null;
   if (!$table) throw new PmUserError("Unknown entity: $entity");
   $pdo->prepare("DELETE FROM $table WHERE id = ?")->execute([$id]);
@@ -711,6 +747,47 @@ function pm_generate_fee(PDO $pdo, int $buildingId, string $month): array {
 
   return ['ok' => true, 'message' => "Generated fee charges totalling \$" . number_format($fee, 2) . " across " . count($owners) . " owner(s), based on \$" . number_format($rentCollected, 2) . " in rent collected."];
 }
+
+/* =========================================================
+   Stamp billing — turns unbilled stamp_log usage into a single
+   owner_ledger charge and marks those rows as billed
+   ========================================================= */
+function pm_bill_stamps(PDO $pdo, array $body): array {
+  $ids = array_values(array_unique(array_map('intval', $body['ids'] ?? [])));
+  $ownerId = (int)($body['ownerId'] ?? 0);
+  $buildingId = !empty($body['buildingId']) ? (int)$body['buildingId'] : null;
+  $rate = (float)($body['rate'] ?? 0);
+
+  if (!$ownerId) throw new PmUserError('Choose an owner to bill.');
+  if (!$ids) return ['ok' => false, 'message' => 'No unbilled stamp usage matches that filter.'];
+  if ($rate <= 0) throw new PmUserError('Enter a per-stamp rate greater than $0.');
+
+  $stmt = $pdo->prepare('SELECT id, quantity FROM stamp_log WHERE id IN (' . pm_in_clause($ids) . ') AND billed = 0');
+  $stmt->execute($ids);
+  $rows = $stmt->fetchAll();
+  if (!$rows) return ['ok' => false, 'message' => 'No unbilled stamp usage matches that filter.'];
+
+  $qty = array_sum(array_map(fn($r) => (int)$r['quantity'], $rows));
+  $amount = round($qty * $rate, 2);
+  $memo = "Postage — {$qty} stamp(s) @ " . number_format($rate, 2);
+
+  if (!$buildingId) {
+    // owner_ledger requires a building; fall back to any building this owner has a stake in.
+    $bstmt = $pdo->prepare('SELECT building_id FROM building_owners WHERE owner_id = ? LIMIT 1');
+    $bstmt->execute([$ownerId]);
+    $buildingId = (int)($bstmt->fetchColumn() ?: 0);
+    if (!$buildingId) throw new PmUserError('This owner has no building on record to bill against.');
+  }
+
+  $pdo->prepare('INSERT INTO owner_ledger (owner_id, building_id, date, type, amount, memo) VALUES (?,?,CURDATE(),"charge",?,?)')
+    ->execute([$ownerId, $buildingId, $amount, $memo]);
+
+  $billedIds = array_map(fn($r) => (int)$r['id'], $rows);
+  $pdo->prepare('UPDATE stamp_log SET billed = 1 WHERE id IN (' . pm_in_clause($billedIds) . ')')->execute($billedIds);
+
+  return ['ok' => true, 'message' => "Billed {$qty} stamp(s) — " . money_fmt($amount) . " charged to the owner."];
+}
+function money_fmt(float $n): string { return '$' . number_format($n, 2); }
 
 /* =========================================================
    Users (admin manages logins here)

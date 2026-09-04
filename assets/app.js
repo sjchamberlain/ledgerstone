@@ -7,7 +7,7 @@
 let DATA = {
   buildings: [], units: [], owners: [], tenants: [], vendors: [], leases: [],
   ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: [],
-  appliances: [], rooms: [], roomOpenings: [], timeEntries: []
+  appliances: [], rooms: [], roomOpenings: [], timeEntries: [], stampLog: []
 };
 let CURRENT_USER = window.PM_USER || {role:'owner'};
 let CSRF_TOKEN = window.PM_CSRF || '';
@@ -77,6 +77,7 @@ function pm_normalize_ids(data){
   (data.rooms||[]).forEach(r=>{ r.id=s(r.id); r.unitId=s(r.unitId); });
   (data.roomOpenings||[]).forEach(o=>{ o.id=s(o.id); o.roomId=s(o.roomId); });
   (data.timeEntries||[]).forEach(t=>{ t.id=s(t.id); t.buildingId=s(t.buildingId); t.unitId=s(t.unitId); t.userId=s(t.userId); });
+  (data.stampLog||[]).forEach(l=>{ l.id=s(l.id); l.buildingId=s(l.buildingId); l.ownerId=s(l.ownerId); });
   if(data.currentUser) data.currentUser.ownerId = s(data.currentUser.ownerId);
 }
 function pm_normalize_user_row(u){
@@ -240,6 +241,7 @@ const NAV_TREE = [
   {id:'ledger', label:'Ledger'},
   {id:'billing', label:'Owner Billing'},
   {id:'communications', label:'Communications'},
+  {id:'printables', label:'Printables', adminOnly:true},
   {id:'management-group', label:'Management', children:[
     {id:'reports', label:'Reports'},
     {id:'timecards', label:'Timecards', adminOnly:true},
@@ -249,6 +251,7 @@ const NAV_TREE = [
 function currentNav(){
   const admin = isAdmin();
   return NAV_TREE
+    .filter(n => admin || !n.adminOnly)
     .map(n => n.children ? {...n, children: n.children.filter(c => admin || !c.adminOnly)} : n)
     .filter(n => !n.children || n.children.length > 0);
 }
@@ -325,6 +328,7 @@ function renderTab(){
     case 'maintenance': return renderMaintenance();
     case 'billing': return renderBilling();
     case 'communications': return renderCommunications();
+    case 'printables': return isAdmin() ? renderPrintables() : renderDashboard();
     case 'reports': return renderReports();
     case 'timecards': return isAdmin() ? renderTimecards() : renderDashboard();
     case 'users': return isAdmin() ? renderUsers() : renderDashboard();
@@ -570,6 +574,7 @@ function renderOwners(){
       <td class="row" style="justify-content:flex-end;">
         <button class="btn btn-ghost btn-sm" onclick="viewOwner('${o.id}')">View</button>
         <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('communication','add',null,'${o.id}')">Log contact</button>
+        <button class="btn btn-ghost btn-sm admin-only" onclick="printForRecipient('owner','${o.id}')">Envelope</button>
         <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('owner','edit','${o.id}')">Edit</button>
         <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete owner ${esc(o.name)}? This will remove them from any buildings.','deleteOwner','${o.id}')">Delete</button>
       </td>
@@ -657,6 +662,7 @@ function renderTenants(){
       <td class="row" style="justify-content:flex-end;">
         <button class="btn btn-ghost btn-sm" onclick="viewTenant('${t.id}')">View</button>
         <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('tenantComm','add',null,'${t.id}')">Log contact</button>
+        <button class="btn btn-ghost btn-sm admin-only" onclick="printForRecipient('tenant','${t.id}')">Envelope</button>
         <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('tenant','edit','${t.id}')">Edit</button>
         <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete tenant ${esc(t.name)}?','deleteTenant','${t.id}')">Delete</button>
       </td>
@@ -741,6 +747,7 @@ function renderVendors(){
   const rows = DATA.vendors.map(v=>`<tr>
     <td>${esc(v.name)}</td><td>${esc(v.trade||'—')}</td><td>${esc(v.email||'—')}</td><td>${esc(v.phone||'—')}</td>
     <td class="row" style="justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm admin-only" onclick="printForRecipient('vendor','${v.id}')">Envelope</button>
       <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('vendor','edit','${v.id}')">Edit</button>
       <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete vendor ${esc(v.name)}?','deleteVendor','${v.id}')">Delete</button>
     </td>
@@ -1209,6 +1216,250 @@ function bucketTag(b){
 }
 
 /* =========================================================
+   PRINTABLES — envelopes and form letters, with return/to
+   addresses pulled from building & owner records, plus a
+   stamp-usage log that can be billed to an owner
+   ========================================================= */
+let printState = {
+  toType:'tenant', toId:'', toName:'', toAddress:'',
+  fromType:'building', fromId:'', fromName:'', fromAddress:'',
+  billBuildingId:'', billOwnerId:'', quantity:1,
+  letterSubject:'', letterBody:'',
+  stampRate:0.73, billToOwner:'', billToBuilding:'',
+};
+
+function nl2br(s){ return esc(s||'').replace(/\n/g,'<br>'); }
+
+// Resolves a {name, address, buildingId, ownerId} block for the given
+// party type/id, used to prefill the To/From fields on the envelope and
+// letter builders below. buildingId/ownerId (when known) also seed which
+// owner the resulting postage gets billed to.
+function resolveParty(type, id){
+  if(!id) return null;
+  if(type==='tenant'){
+    const t = getTenant(id); if(!t) return null;
+    const leases = DATA.leases.filter(l=>l.tenantId===id);
+    const lease = leases.find(l=>l.status==='active') || leases[leases.length-1];
+    const unit = lease ? getUnit(lease.unitId) : null;
+    const b = unit ? getBuilding(unit.buildingId) : null;
+    const address = b ? [b.address, unit?('Unit '+unit.number):''].filter(Boolean).join('\n') : '';
+    return {name:t.name, address, buildingId: b?b.id:'', ownerId:''};
+  }
+  if(type==='vendor'){
+    const v = getVendor(id); if(!v) return null;
+    return {name:v.name, address:v.address||'', buildingId:'', ownerId:''};
+  }
+  if(type==='owner'){
+    const o = getOwner(id); if(!o) return null;
+    return {name:o.name, address:o.mailingAddress||'', buildingId:'', ownerId:o.id};
+  }
+  if(type==='building'){
+    const b = getBuilding(id); if(!b) return null;
+    return {name:b.name, address:b.address||'', buildingId:b.id, ownerId:''};
+  }
+  return null;
+}
+
+function printSetTo(type){ printState.toType=type; printState.toId=''; printState.toName=''; printState.toAddress=''; render(); }
+function printSetFrom(type){ printState.fromType=type; printState.fromId=''; printState.fromName=''; printState.fromAddress=''; render(); }
+function printPickTo(id){
+  printState.toId=id;
+  const p = resolveParty(printState.toType, id);
+  if(p){ printState.toName=p.name; printState.toAddress=p.address; if(p.buildingId) printState.billBuildingId=p.buildingId; if(p.ownerId) printState.billOwnerId=p.ownerId; }
+  render();
+}
+function printPickFrom(id){
+  printState.fromId=id;
+  const p = resolveParty(printState.fromType, id);
+  if(p){ printState.fromName=p.name; printState.fromAddress=p.address; if(p.buildingId) printState.billBuildingId=p.buildingId; if(p.ownerId) printState.billOwnerId=p.ownerId; }
+  render();
+}
+// Jump into Printables with a recipient already picked — used by the
+// "Envelope" quick links on the Owners/Tenants/Vendors lists.
+function printForRecipient(type, id){
+  currentTab='printables';
+  printState.toType=type;
+  printPickTo(id);
+}
+
+const LETTER_TEMPLATES = {
+  lateRent: (ctx)=>`This letter is to notify you that your rent payment is past due as of ${fmtDate(todayISO())}.\n\nPlease remit payment as soon as possible to avoid further action. If you have already sent payment, please disregard this notice.\n\nContact us if you have any questions.`,
+  renewal: (ctx)=>`Your lease is coming up for renewal. We'd like to offer you the opportunity to renew for another term.\n\nPlease let us know your intentions at your earliest convenience so we can prepare the paperwork.`,
+  general: (ctx)=>``,
+};
+function printInsertTemplate(key){
+  printState.letterBody = LETTER_TEMPLATES[key] ? LETTER_TEMPLATES[key]() : '';
+  render();
+}
+
+async function logStampUse(purpose){
+  try{
+    await apiSave('stampLog', {
+      id:null, date: todayISO(), buildingId: printState.billBuildingId||'', ownerId: printState.billOwnerId||'',
+      quantity: printState.quantity||1, purpose, billed:false,
+    });
+    await refreshData();
+  }catch(e){ console.error('Could not log stamp use', e); }
+}
+
+function partySelectorFields(prefix, typeVal, idVal, onType, onPick){
+  const typeOpts = [['tenant','Tenant'],['vendor','Vendor'],['owner','Owner'],['building','Building'],['custom','Custom / other']]
+    .map(([v,l])=>`<option value="${v}" ${typeVal===v?'selected':''}>${l}</option>`).join('');
+  let list = '';
+  if(typeVal==='tenant') list = DATA.tenants.map(t=>`<option value="${t.id}" ${idVal===t.id?'selected':''}>${esc(t.name)}</option>`).join('');
+  else if(typeVal==='vendor') list = DATA.vendors.map(v=>`<option value="${v.id}" ${idVal===v.id?'selected':''}>${esc(v.name)}</option>`).join('');
+  else if(typeVal==='owner') list = DATA.owners.map(o=>`<option value="${o.id}" ${idVal===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
+  else if(typeVal==='building') list = DATA.buildings.map(b=>`<option value="${b.id}" ${idVal===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  return `
+  <div class="field-row">
+    <div class="field"><label>${prefix} — type</label><select onchange="${onType}(this.value)">${typeOpts}</select></div>
+    ${typeVal==='custom' ? '' : `<div class="field"><label>${prefix} — who</label><select onchange="${onPick}(this.value)"><option value="">— select —</option>${list}</select></div>`}
+  </div>`;
+}
+
+function renderPrintables(){
+  return `
+  <div class="page-head">
+    <div><h1 class="page-title">Printables</h1><div class="page-sub">Envelopes and form letters, addressed from your building &amp; owner records</div></div>
+  </div>
+  ${renderEnvelopeBuilder()}
+  ${renderLetterBuilder()}
+  ${renderStampLog()}
+  `;
+}
+
+function renderEnvelopeBuilder(){
+  return `
+  <div class="panel">
+    <h3>Print an envelope</h3>
+    <div class="page-sub" style="margin:-6px 0 14px;">Choose who it's from and who it's going to — addresses are pulled from that record and can be edited below before printing.</div>
+    ${partySelectorFields('From', printState.fromType, printState.fromId, 'printSetFrom', 'printPickFrom')}
+    <div class="field-row">
+      <div class="field"><label>Return name</label><input value="${esc(printState.fromName)}" oninput="printState.fromName=this.value"></div>
+      <div class="field"><label>Return address</label><textarea oninput="printState.fromAddress=this.value">${esc(printState.fromAddress)}</textarea></div>
+    </div>
+    ${partySelectorFields('To', printState.toType, printState.toId, 'printSetTo', 'printPickTo')}
+    <div class="field-row">
+      <div class="field"><label>To name</label><input value="${esc(printState.toName)}" oninput="printState.toName=this.value"></div>
+      <div class="field"><label>To address</label><textarea oninput="printState.toAddress=this.value">${esc(printState.toAddress)}</textarea></div>
+    </div>
+    <div class="field-row" style="align-items:flex-end;">
+      <div class="field" style="max-width:140px;"><label>Stamps used</label><input type="number" min="1" value="${printState.quantity}" oninput="printState.quantity=Number(this.value)"></div>
+      <button class="btn no-print" onclick="printEnvelope()">Print Envelope</button>
+    </div>
+    <div class="envelope-preview no-print">
+      <div class="envelope-return">${esc(printState.fromName)}<br>${nl2br(printState.fromAddress)}</div>
+      <div class="envelope-to">${esc(printState.toName)}<br>${nl2br(printState.toAddress)}</div>
+    </div>
+  </div>`;
+}
+
+function renderLetterBuilder(){
+  return `
+  <div class="panel">
+    <h3>Send a form letter</h3>
+    <div class="page-sub" style="margin:-6px 0 14px;">Uses the same From/To addresses as the envelope above. Pick a starting template or write your own.</div>
+    <div class="field-row">
+      <div class="field"><label>Subject</label><input value="${esc(printState.letterSubject)}" oninput="printState.letterSubject=this.value" placeholder="e.g. Late rent notice"></div>
+    </div>
+    <div class="row" style="margin-bottom:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="printInsertTemplate('lateRent')">Insert: Late Rent Notice</button>
+      <button class="btn btn-ghost btn-sm" onclick="printInsertTemplate('renewal')">Insert: Lease Renewal</button>
+    </div>
+    <div class="field"><label>Body</label><textarea style="min-height:180px;" oninput="printState.letterBody=this.value">${esc(printState.letterBody)}</textarea></div>
+    <button class="btn no-print" onclick="printLetter()">Print Letter</button>
+  </div>`;
+}
+
+function renderStampLog(){
+  const unbilled = DATA.stampLog.filter(s=>!s.billed);
+  const ownerOpts = DATA.owners.map(o=>`<option value="${o.id}" ${printState.billToOwner===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
+  const buildingOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${printState.billToBuilding===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  const matching = unbilled.filter(s=> (!printState.billToOwner || s.ownerId===printState.billToOwner) && (!printState.billToBuilding || s.buildingId===printState.billToBuilding));
+  const qty = matching.reduce((s,x)=>s+Number(x.quantity),0);
+  const total = qty * Number(printState.stampRate||0);
+
+  const allRows = DATA.stampLog.slice(0,50).map(s=>`<tr>
+    <td>${fmtDate(s.date)}</td>
+    <td>${esc(s.purpose||'—')}</td>
+    <td>${esc(getBuilding(s.buildingId)?.name||'—')}</td>
+    <td>${esc(getOwner(s.ownerId)?.name||'—')}</td>
+    <td class="num">${s.quantity}</td>
+    <td>${s.billed?'<span class="tag tag-good">Billed</span>':'<span class="tag tag-warn">Unbilled</span>'}</td>
+    <td class="row" style="justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="openModal('stampLog','edit','${s.id}')">Edit</button>
+      <button class="btn-danger btn btn-sm" onclick="askDelete('Delete this stamp log entry?','deleteStampLog','${s.id}')">Delete</button>
+    </td>
+  </tr>`).join('');
+
+  return `
+  <div class="panel">
+    <h3>Stamps</h3>
+    <div class="page-sub" style="margin:-6px 0 14px;">Every envelope and letter you print logs a stamp here. Bill unbilled usage to an owner as a management-fee-style charge.</div>
+    <div class="row" style="align-items:flex-end;margin-bottom:14px;">
+      <div class="field"><label>Owner</label><select onchange="printState.billToOwner=this.value;render();"><option value="">— any —</option>${ownerOpts}</select></div>
+      <div class="field"><label>Building (optional)</label><select onchange="printState.billToBuilding=this.value;render();"><option value="">— any —</option>${buildingOpts}</select></div>
+      <div class="field" style="max-width:120px;"><label>$ / stamp</label><input type="number" step="0.01" value="${printState.stampRate}" oninput="printState.stampRate=Number(this.value)"></div>
+      <button class="btn" ${(!printState.billToOwner||qty===0)?'disabled':''} onclick="billStampsToOwner()">Bill ${qty} stamp(s) — ${money(total)}</button>
+      <button class="btn btn-ghost" onclick="openModal('stampLog','add')">+ Log Stamps</button>
+    </div>
+    ${allRows? `<table><thead><tr><th>Date</th><th>Purpose</th><th>Building</th><th>Owner</th><th class="num">Qty</th><th>Status</th><th></th></tr></thead><tbody>${allRows}</tbody></table>` : `<div class="empty">No stamp usage logged yet.</div>`}
+  </div>`;
+}
+
+async function billStampsToOwner(){
+  const unbilled = DATA.stampLog.filter(s=>!s.billed && (!printState.billToOwner||s.ownerId===printState.billToOwner) && (!printState.billToBuilding||s.buildingId===printState.billToBuilding));
+  const ids = unbilled.map(s=>s.id);
+  if(!ids.length || !printState.billToOwner) return;
+  try{
+    const r = await apiCall('billStamps', {ids, ownerId: printState.billToOwner, buildingId: printState.billToBuilding||null, rate: printState.stampRate});
+    if(r.ok){ await refreshData(); alertMsg(r.message||'Billed.'); } else { alertMsg(r.message||'Could not bill stamps.'); }
+  }catch(e){ alertMsg('Could not bill stamps: '+e.message); }
+}
+
+async function printEnvelope(){
+  if(!printState.toName || !printState.toAddress){ alertMsg('Enter a "To" name and address first.'); return; }
+  const w = window.open('', '_blank', 'width=760,height=380');
+  if(!w){ alertMsg('Pop-up blocked — allow pop-ups to print envelopes.'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Envelope</title><style>
+    @page{ size: 9.5in 4.125in; margin:0; }
+    body{ margin:0; width:9.5in; height:4.125in; font-family:Arial,sans-serif; font-size:13px; position:relative; }
+    .ret{ position:absolute; top:0.4in; left:0.5in; max-width:3.5in; line-height:1.4; }
+    .to{ position:absolute; top:1.9in; left:4.6in; max-width:4in; font-size:14px; line-height:1.5; }
+  </style></head><body>
+    <div class="ret">${esc(printState.fromName)}<br>${nl2br(printState.fromAddress)}</div>
+    <div class="to">${esc(printState.toName)}<br>${nl2br(printState.toAddress)}</div>
+    <script>window.onload=function(){window.print();};<\/script>
+  </body></html>`);
+  w.document.close();
+  await logStampUse('Envelope to ' + printState.toName);
+}
+
+async function printLetter(){
+  if(!printState.toName){ alertMsg('Choose a "To" recipient first.'); return; }
+  const w = window.open('', '_blank');
+  if(!w){ alertMsg('Pop-up blocked — allow pop-ups to print.'); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Letter</title><style>
+    body{ font-family:Arial,sans-serif; font-size:14px; line-height:1.6; max-width:6.5in; margin:0.75in auto; color:#222; }
+    .letterhead{ margin-bottom:0.5in; }
+    .date{ margin-bottom:0.3in; }
+    .to-block{ margin-bottom:0.3in; }
+    .subject{ font-weight:600; margin-bottom:0.25in; }
+    .sig{ margin-top:0.5in; }
+  </style></head><body>
+    <div class="letterhead"><strong>${esc(printState.fromName)}</strong><br>${nl2br(printState.fromAddress)}</div>
+    <div class="date">${fmtDate(todayISO())}</div>
+    <div class="to-block">${esc(printState.toName)}<br>${nl2br(printState.toAddress)}</div>
+    ${printState.letterSubject? `<div class="subject">Re: ${esc(printState.letterSubject)}</div>` : ''}
+    <div class="body">${nl2br(printState.letterBody)}</div>
+    <div class="sig">Sincerely,<br><br><br>${esc(printState.fromName)}</div>
+    <script>window.onload=function(){window.print();};<\/script>
+  </body></html>`);
+  w.document.close();
+  await logStampUse('Letter to ' + printState.toName + (printState.letterSubject? ' — '+printState.letterSubject:''));
+}
+
+/* =========================================================
    USERS (admin only) — accounts, roles, and which owner a
    login is scoped to
    ========================================================= */
@@ -1386,13 +1637,16 @@ function openModal(type, mode, id, extra){
       draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.roomOpenings.find(o=>o.id===id))) : {id:null, roomId: extra||'', type:'window', label:'', widthIn:'', heightIn:'', notes:''};
       break;
     case 'owner':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(getOwner(id))) : {id:null, name:'', email:'', phone:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getOwner(id))) : {id:null, name:'', email:'', phone:'', mailingAddress:''};
       break;
     case 'tenant':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getTenant(id))) : {id:null, name:'', email:'', phone:''};
       break;
     case 'vendor':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(getVendor(id))) : {id:null, name:'', trade:'', email:'', phone:'', notes:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getVendor(id))) : {id:null, name:'', trade:'', email:'', phone:'', address:'', notes:''};
+      break;
+    case 'stampLog':
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.stampLog.find(l=>l.id===id))) : {id:null, date: todayISO(), buildingId: extra||'', ownerId:'', quantity:1, purpose:'', billed:false};
       break;
     case 'lease':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getLease(id))) : {id:null, unitId:'', tenantId:'', startDate: todayISO(), endDate:'', rentAmount:0, depositAmount:0, billingDay:1, status:'active'};
@@ -1493,6 +1747,7 @@ function renderModal(){
     case 'room': title = modal.mode==='add'?'Add Room':'Edit Room'; body = roomForm(); break;
     case 'roomOpening': title = modal.mode==='add'?(draft.type==='door'?'Add Door':'Add Window'):'Edit Door/Window'; body = roomOpeningForm(); break;
     case 'timeEntry': title = modal.mode==='add'?'Log Time':'Edit Time Entry'; body = timeEntryForm(); break;
+    case 'stampLog': title = modal.mode==='add'?'Log Stamp Usage':'Edit Stamp Usage'; body = stampLogForm(); break;
     case 'user': title = modal.mode==='add'?'Add User':'Edit User'; body = userForm(); break;
     case 'changePassword': title = 'Change Password'; body = changePasswordForm(); break;
   }
@@ -1617,7 +1872,8 @@ function ownerForm(){
   return `
   <div class="field"><label>Name</label><input value="${esc(draft.name)}" oninput="updateDraft('name',this.value)"></div>
   <div class="field"><label>Email</label><input value="${esc(draft.email)}" oninput="updateDraft('email',this.value)"></div>
-  <div class="field"><label>Phone</label><input value="${esc(draft.phone)}" oninput="updateDraft('phone',this.value)"></div>`;
+  <div class="field"><label>Phone</label><input value="${esc(draft.phone)}" oninput="updateDraft('phone',this.value)"></div>
+  <div class="field"><label>Mailing address</label><textarea oninput="updateDraft('mailingAddress',this.value)" placeholder="Used as the address on printed mail, e.g. envelopes and owner statements">${esc(draft.mailingAddress||'')}</textarea></div>`;
 }
 function tenantForm(){
   return `
@@ -1634,7 +1890,23 @@ function vendorForm(){
     <div class="field"><label>Email</label><input value="${esc(draft.email||'')}" oninput="updateDraft('email',this.value)"></div>
     <div class="field"><label>Phone</label><input value="${esc(draft.phone||'')}" oninput="updateDraft('phone',this.value)"></div>
   </div>
+  <div class="field"><label>Mailing address</label><input value="${esc(draft.address||'')}" oninput="updateDraft('address',this.value)" placeholder="Used on printed envelopes and letters"></div>
   <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
+}
+
+function stampLogForm(){
+  const bOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${draft.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  const oOpts = DATA.owners.map(o=>`<option value="${o.id}" ${draft.ownerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
+  return `
+  <div class="field-row">
+    <div class="field"><label>Date</label><input type="date" value="${draft.date}" oninput="updateDraft('date',this.value)"></div>
+    <div class="field" style="max-width:120px;"><label>Quantity</label><input type="number" min="1" value="${draft.quantity}" oninput="updateDraftNum('quantity',this.value)"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Building (optional)</label><select onchange="updateDraft('buildingId',this.value)"><option value="">— none —</option>${bOpts}</select></div>
+    <div class="field"><label>Bill to owner (optional)</label><select onchange="updateDraft('ownerId',this.value)"><option value="">— none —</option>${oOpts}</select></div>
+  </div>
+  <div class="field"><label>Purpose</label><input value="${esc(draft.purpose||'')}" oninput="updateDraft('purpose',this.value)" placeholder="e.g. Mailed lease renewal to tenant"></div>`;
 }
 
 function leaseForm(){
@@ -1837,7 +2109,7 @@ const DELETE_ENTITY_MAP = {
   deleteLease:'lease', deleteLedgerEntry:'ledgerEntry', deleteMaintenance:'maintenance',
   deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm',
   deleteAppliance:'appliance', deleteTimeEntry:'timeEntry',
-  deleteRoom:'room', deleteRoomOpening:'roomOpening'
+  deleteRoom:'room', deleteRoomOpening:'roomOpening', deleteStampLog:'stampLog'
 };
 async function runConfirmedAction(){
   const {action, id} = confirmState;

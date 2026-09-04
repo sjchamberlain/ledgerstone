@@ -119,6 +119,9 @@
     .main{padding:0;}
     body{background:#fff;}
   }
+  .envelope-preview{position:relative;width:100%;max-width:660px;height:280px;margin-top:14px;border:1px solid var(--line);border-radius:6px;background:#fff;overflow:hidden;}
+  .envelope-preview .envelope-return{position:absolute;top:24px;left:28px;max-width:250px;font-size:12.5px;line-height:1.4;color:var(--ink);}
+  .envelope-preview .envelope-to{position:absolute;top:120px;left:340px;max-width:280px;font-size:13.5px;line-height:1.5;color:var(--ink);}
 .sidebar-foot a{color:#9FB2C4;text-decoration:none;}
 .sidebar-foot a:hover{text-decoration:underline;}
 /* Admin-only controls are hidden client-side for owner logins as a UX courtesy —
