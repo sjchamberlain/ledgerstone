@@ -7,7 +7,8 @@ CREATE TABLE owners (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(150) NOT NULL,
   email VARCHAR(150),
-  phone VARCHAR(50)
+  phone VARCHAR(50),
+  mailing_address TEXT NULL   -- used as the return/to address on printed mail
 ) ENGINE=InnoDB;
 
 CREATE TABLE buildings (
@@ -92,6 +93,7 @@ CREATE TABLE vendors (
   trade VARCHAR(100),
   email VARCHAR(150),
   phone VARCHAR(50),
+  address VARCHAR(255) NULL,  -- mailing address, for printed envelopes/letters
   notes TEXT
 ) ENGINE=InnoDB;
 
@@ -204,6 +206,18 @@ CREATE TABLE time_entries (
   FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
   FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE SET NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE stamp_log (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  date DATE NOT NULL,
+  building_id INT NULL,      -- which building's mail this postage covers, when known
+  owner_id INT NULL,         -- which owner to bill this postage to, when known
+  quantity INT NOT NULL DEFAULT 1,
+  purpose VARCHAR(255) NULL, -- e.g. "Envelope to Jane Smith" or "Letter — late rent notice"
+  billed TINYINT(1) NOT NULL DEFAULT 0,
+  FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE SET NULL,
+  FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- Seed one admin account so you can log in the first time.

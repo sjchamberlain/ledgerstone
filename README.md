@@ -167,6 +167,9 @@ If your database predates the Vendors directory, also run
 If your database predates per-room measurements, also run
 `migrations/004_rooms.sql` the same way.
 
+If your database predates Printables (envelope/letter mailing addresses
+and the stamp log), also run `migrations/005_printables.sql` the same way.
+
 ## Building/unit profiles, appliances, and timecards
 
 - **Properties** → a building's edit form now has roof/electrical/exterior
@@ -193,6 +196,16 @@ If your database predates per-room measurements, also run
   Run it monthly and use **Print** (or your browser's "Save as PDF") to
   send it to the owner — there's no automated email sender built in yet,
   since this app has no mail server configuration.
+- **Printables** (staff only) prints envelopes and form letters. Pick a
+  "From" (a building or an owner) and a "To" (a tenant, vendor, owner, or
+  custom entry) and it pulls the mailing address from that record —
+  tenants use their unit's building address, owners and vendors use the
+  mailing address on their record. Both addresses stay editable before
+  printing. Each print (envelope or letter) logs a stamp in the **Stamps**
+  panel below, which you can bill to an owner in bulk as an owner-ledger
+  charge (quantity × a per-stamp rate you set). An **Envelope** button on
+  the Owners/Tenants/Vendors lists jumps straight into Printables with
+  that recipient already picked.
 
 ## Extending this later
 
