@@ -224,8 +224,13 @@ function pm_get_all(PDO $pdo, array $user): array {
 }
 
 function pm_in_clause(?array $ids): string {
+  // Every call site pairs this with an execute() that falls back to a
+  // single sentinel param (`$ids ?: [0]`) when the id list is empty — so
+  // an empty (but non-null) list must still return exactly one placeholder
+  // here, or PDO throws "Invalid parameter number" on the param-count
+  // mismatch. `id IN (?)` bound to 0 is a safe no-match, since ids start at 1.
   if ($ids === null) return '1=1';
-  if (count($ids) === 0) return '0=1';
+  if (count($ids) === 0) return '?';
   return implode(',', array_fill(0, count($ids), '?'));
 }
 
