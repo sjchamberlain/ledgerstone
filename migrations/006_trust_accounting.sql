@@ -202,19 +202,23 @@ FROM owner_ledger
 ORDER BY owner_id, building_id, date, id;
 
 -- Recompute running_balance per (owner_id, building_id), oldest first.
+-- MySQL doesn't allow ORDER BY on a multi-table UPDATE ... JOIN — the
+-- ordering has to happen inside the joined subquery instead, computing
+-- each row's balance there before it's written back by id.
 SET @rb := 0, @ob := NULL, @bb := NULL;
-UPDATE trust_transactions
+UPDATE trust_transactions t
 JOIN (
-  SELECT id FROM trust_transactions ORDER BY owner_id, building_id, date, id
-) AS ordered ON ordered.id = trust_transactions.id
-SET running_balance = (
-  @rb := IF(@ob = trust_transactions.owner_id AND @bb = trust_transactions.building_id, @rb, 0)
-    + IF(trust_transactions.type IN ('income','transfer_in'), trust_transactions.amount,
-        IF(trust_transactions.type = 'adjustment', trust_transactions.amount, -trust_transactions.amount)),
-  @ob := trust_transactions.owner_id,
-  @bb := trust_transactions.building_id
-)
-ORDER BY trust_transactions.owner_id, trust_transactions.building_id, trust_transactions.date, trust_transactions.id;
+  SELECT
+    id,
+    (@rb := IF(@ob = owner_id AND @bb = building_id, @rb, 0)
+      + IF(type IN ('income','transfer_in'), amount,
+          IF(type = 'adjustment', amount, -amount))) AS new_balance,
+    @ob := owner_id,
+    @bb := building_id
+  FROM trust_transactions
+  ORDER BY owner_id, building_id, date, id
+) AS calc ON calc.id = t.id
+SET t.running_balance = calc.new_balance;
 
 DROP TABLE owner_ledger;
 
