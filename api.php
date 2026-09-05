@@ -56,16 +56,37 @@ try {
       exit;
     }
 
-    if ($action === 'generateFee') {
+    if ($action === 'generateOwnerStatement') {
       pm_require_admin();
-      $result = pm_generate_fee($pdo, (int)$body['buildingId'], (string)$body['month']);
+      $result = pm_generate_owner_statement($pdo, (int)$body['ownerId'], (int)$body['buildingId'], (string)$body['month'], $user, isset($body['stampRate']) && $body['stampRate'] !== '' ? (float)$body['stampRate'] : null);
       echo json_encode($result);
       exit;
     }
 
-    if ($action === 'billStamps') {
+    if ($action === 'approveMaintenance') {
+      $decision = (string)($body['decision'] ?? '');
+      $result = pm_decide_maintenance_approval($pdo, $user, (int)($body['id'] ?? 0), $decision);
+      echo json_encode($result);
+      exit;
+    }
+
+    if ($action === 'transferOwner') {
       pm_require_admin();
-      $result = pm_bill_stamps($pdo, $body);
+      $result = pm_transfer_owner($pdo, $user, $body);
+      echo json_encode($result);
+      exit;
+    }
+
+    if ($action === 'postDepositTransaction') {
+      pm_require_admin();
+      $result = pm_post_deposit_transaction($pdo, $body);
+      echo json_encode($result);
+      exit;
+    }
+
+    if ($action === 'postTrustAdjustment') {
+      pm_require_admin();
+      $result = pm_post_trust_adjustment($pdo, $body);
       echo json_encode($result);
       exit;
     }
@@ -173,7 +194,9 @@ function pm_get_all(PDO $pdo, array $user): array {
 
   if ($isAdmin) {
     $ownerRows = pm_fetch_owners($pdo, null);
-    $ownerLedgerRows = pm_fetch_owner_ledger($pdo, null, null);
+    $trustRows = pm_fetch_trust_transactions($pdo, null, null);
+    $statementRows = pm_fetch_owner_statements($pdo, null, null);
+    $transferRows = pm_fetch_owner_transfers($pdo, null);
     $commRows = pm_fetch_communications($pdo, null);
     $tenantCommRows = pm_fetch_tenant_communications($pdo, null);
   } else {
@@ -182,10 +205,15 @@ function pm_get_all(PDO $pdo, array $user): array {
     $stmt->execute($buildingIdList ?: [0]);
     $visibleOwnerIds = array_map('intval', array_column($stmt->fetchAll(), 'owner_id'));
     $ownerRows = pm_fetch_owners($pdo, $visibleOwnerIds ?: [0]);
-    $ownerLedgerRows = pm_fetch_owner_ledger($pdo, [$user['owner_id']], null);
+    $trustRows = pm_fetch_trust_transactions($pdo, [$user['owner_id']], null);
+    $statementRows = pm_fetch_owner_statements($pdo, [$user['owner_id']], null);
+    $transferRows = pm_fetch_owner_transfers($pdo, $buildingIdList);
     $commRows = pm_fetch_communications($pdo, [$user['owner_id']]);
     $tenantCommRows = pm_fetch_tenant_communications($pdo, $leaseIdList ?: [0]);
   }
+
+  $depositRows = pm_fetch_security_deposits($pdo, $leaseIdList, $isAdmin);
+  $depositTxRows = pm_fetch_security_deposit_transactions($pdo, array_column($depositRows, 'id'));
 
   $applianceRows = pm_fetch_appliances($pdo, $unitIdList);
   $roomRows = pm_fetch_rooms($pdo, $unitIdList);
@@ -212,7 +240,11 @@ function pm_get_all(PDO $pdo, array $user): array {
     'leases' => $leaseRows,
     'ledger' => $ledgerRows,
     'maintenance' => $maintRows,
-    'ownerLedger' => $ownerLedgerRows,
+    'trustTransactions' => $trustRows,
+    'securityDeposits' => $depositRows,
+    'securityDepositTransactions' => $depositTxRows,
+    'ownerStatements' => $statementRows,
+    'ownerTransfers' => $transferRows,
     'communications' => $commRows,
     'tenantCommunications' => $tenantCommRows,
     'appliances' => $applianceRows,
@@ -256,6 +288,8 @@ function pm_fetch_buildings(PDO $pdo, ?array $buildingIds): array {
       'roofLastServiced' => $r['roof_last_serviced'], 'roofNotes' => $r['roof_notes'],
       'electricalLoad' => $r['electrical_load'], 'exteriorPaintColor' => $r['exterior_paint_color'],
       'profileNotes' => $r['profile_notes'],
+      'reserveAmount' => (float)$r['reserve_amount'],
+      'maintenanceApprovalThreshold' => $r['maintenance_approval_threshold'] !== null ? (float)$r['maintenance_approval_threshold'] : null,
     ];
   }
   return $out;
@@ -403,6 +437,7 @@ function pm_fetch_ledger(PDO $pdo, array $leaseIds, bool $isAdmin): array {
   return array_map(fn($r) => [
     'id' => (int)$r['id'], 'leaseId' => (int)$r['lease_id'], 'date' => $r['date'], 'type' => $r['type'],
     'category' => $r['category'], 'amount' => (float)$r['amount'], 'memo' => $r['memo'],
+    'paymentMethod' => $r['payment_method'], 'chargeId' => $r['charge_id'] !== null ? (int)$r['charge_id'] : null,
   ], $stmt->fetchAll());
 }
 
@@ -421,21 +456,106 @@ function pm_fetch_maintenance(PDO $pdo, array $buildingIds, array $unitIds, bool
     'description' => $r['description'], 'priority' => $r['priority'], 'status' => $r['status'],
     'dateReported' => $r['date_reported'], 'dateCompleted' => $r['date_completed'], 'cost' => (float)$r['cost'],
     'notes' => $r['notes'],
+    'vendorId' => $r['vendor_id'] !== null ? (int)$r['vendor_id'] : null,
+    'invoiceNumber' => $r['invoice_number'], 'invoiceDate' => $r['invoice_date'],
+    'approvalStatus' => $r['approval_status'],
+    'approvedBy' => $r['approved_by'] !== null ? (int)$r['approved_by'] : null,
+    'approvedAt' => $r['approved_at'],
   ], $stmt->fetchAll());
 }
 
-function pm_fetch_owner_ledger(PDO $pdo, ?array $ownerIds, ?array $buildingIds): array {
-  $sql = 'SELECT * FROM owner_ledger';
+/* =========================================================
+   TRUST ACCOUNTING — owner trust balance per building (segregated from
+   security deposits), generated owner statements, and the ownership-
+   transfer audit trail.
+   ========================================================= */
+function pm_fetch_trust_transactions(PDO $pdo, ?array $ownerIds, ?array $buildingIds): array {
+  $sql = 'SELECT * FROM trust_transactions';
   $params = [];
-  if ($ownerIds !== null) {
-    $sql .= ' WHERE owner_id IN (' . pm_in_clause($ownerIds) . ')';
-    $params = $ownerIds ?: [0];
-  }
+  $clauses = [];
+  if ($ownerIds !== null) { $clauses[] = 'owner_id IN (' . pm_in_clause($ownerIds) . ')'; $params = array_merge($params, $ownerIds ?: [0]); }
+  if ($buildingIds !== null) { $clauses[] = 'building_id IN (' . pm_in_clause($buildingIds) . ')'; $params = array_merge($params, $buildingIds ?: [0]); }
+  if ($clauses) $sql .= ' WHERE ' . implode(' AND ', $clauses);
+  $sql .= ' ORDER BY owner_id, building_id, date, id';
   $stmt = $pdo->prepare($sql);
   $stmt->execute($params);
   return array_map(fn($r) => [
     'id' => (int)$r['id'], 'ownerId' => (int)$r['owner_id'], 'buildingId' => (int)$r['building_id'],
-    'date' => $r['date'], 'type' => $r['type'], 'amount' => (float)$r['amount'], 'memo' => $r['memo'],
+    'type' => $r['type'], 'category' => $r['category'], 'date' => $r['date'],
+    'amount' => (float)$r['amount'], 'runningBalance' => (float)$r['running_balance'], 'memo' => $r['memo'],
+    'relatedLedgerId' => $r['related_ledger_id'] !== null ? (int)$r['related_ledger_id'] : null,
+    'relatedMaintenanceId' => $r['related_maintenance_id'] !== null ? (int)$r['related_maintenance_id'] : null,
+    'relatedTransferId' => $r['related_transfer_id'] !== null ? (int)$r['related_transfer_id'] : null,
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_security_deposits(PDO $pdo, array $leaseIds, bool $isAdmin): array {
+  $sql = 'SELECT * FROM security_deposits';
+  $params = [];
+  if (!$isAdmin) {
+    $sql .= ' WHERE lease_id IN (' . pm_in_clause($leaseIds) . ')';
+    $params = $leaseIds ?: [0];
+  }
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'leaseId' => (int)$r['lease_id'], 'unitId' => (int)$r['unit_id'],
+    'tenantId' => (int)$r['tenant_id'], 'buildingId' => (int)$r['building_id'],
+    'amountHeld' => (float)$r['amount_held'], 'dateReceived' => $r['date_received'], 'status' => $r['status'],
+    'notes' => $r['notes'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_security_deposit_transactions(PDO $pdo, array $depositIds): array {
+  if (!$depositIds) return [];
+  $sql = 'SELECT * FROM security_deposit_transactions WHERE security_deposit_id IN (' . pm_in_clause($depositIds) . ') ORDER BY date, id';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($depositIds);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'securityDepositId' => (int)$r['security_deposit_id'], 'date' => $r['date'],
+    'type' => $r['type'], 'amount' => (float)$r['amount'], 'memo' => $r['memo'],
+    'relatedLedgerId' => $r['related_ledger_id'] !== null ? (int)$r['related_ledger_id'] : null,
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_owner_statements(PDO $pdo, ?array $ownerIds, ?array $buildingIds): array {
+  $sql = 'SELECT * FROM owner_statements';
+  $params = [];
+  $clauses = [];
+  if ($ownerIds !== null) { $clauses[] = 'owner_id IN (' . pm_in_clause($ownerIds) . ')'; $params = array_merge($params, $ownerIds ?: [0]); }
+  if ($buildingIds !== null) { $clauses[] = 'building_id IN (' . pm_in_clause($buildingIds) . ')'; $params = array_merge($params, $buildingIds ?: [0]); }
+  if ($clauses) $sql .= ' WHERE ' . implode(' AND ', $clauses);
+  $sql .= ' ORDER BY period_start DESC, id DESC';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'ownerId' => (int)$r['owner_id'], 'buildingId' => (int)$r['building_id'],
+    'periodStart' => $r['period_start'], 'periodEnd' => $r['period_end'],
+    'rentDue' => (float)$r['rent_due'], 'rentCollected' => (float)$r['rent_collected'],
+    'lateFeesCollected' => (float)$r['late_fees_collected'], 'otherIncome' => (float)$r['other_income'],
+    'managementFee' => (float)$r['management_fee'], 'repairsTotal' => (float)$r['repairs_total'],
+    'otherExpenses' => (float)$r['other_expenses'], 'reserveHeld' => (float)$r['reserve_held'],
+    'amountDisbursed' => (float)$r['amount_disbursed'], 'endingTrustBalance' => (float)$r['ending_trust_balance'],
+    'lineItems' => json_decode($r['line_items'], true) ?: [], 'generatedAt' => $r['generated_at'],
+  ], $stmt->fetchAll());
+}
+
+function pm_fetch_owner_transfers(PDO $pdo, ?array $buildingIds): array {
+  $sql = 'SELECT * FROM owner_transfers';
+  $params = [];
+  if ($buildingIds !== null) {
+    $sql .= ' WHERE building_id IN (' . pm_in_clause($buildingIds) . ')';
+    $params = $buildingIds ?: [0];
+  }
+  $sql .= ' ORDER BY transfer_date DESC, id DESC';
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  return array_map(fn($r) => [
+    'id' => (int)$r['id'], 'buildingId' => (int)$r['building_id'], 'fromOwnerId' => (int)$r['from_owner_id'],
+    'toOwnerId' => (int)$r['to_owner_id'], 'transferDate' => $r['transfer_date'],
+    'ownershipPct' => (float)$r['ownership_pct'], 'trustBalanceTransferred' => (float)$r['trust_balance_transferred'],
+    'depositsTransferredCount' => (int)$r['deposits_transferred_count'],
+    'depositsTransferredTotal' => (float)$r['deposits_transferred_total'], 'notes' => $r['notes'],
   ], $stmt->fetchAll());
 }
 
@@ -482,12 +602,13 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
       $profileFields = [
         $r['roofLastServiced'] ?: null, $r['roofNotes'] ?? '', $r['electricalLoad'] ?? '',
         $r['exteriorPaintColor'] ?? '', $r['profileNotes'] ?? '',
+        $r['reserveAmount'] ?: 0, ($r['maintenanceApprovalThreshold'] ?? '') === '' ? null : (float)$r['maintenanceApprovalThreshold'],
       ];
       if ($id) {
-        $stmt = $pdo->prepare('UPDATE buildings SET name=?, address=?, fee_type=?, fee_value=?, roof_last_serviced=?, roof_notes=?, electrical_load=?, exterior_paint_color=?, profile_notes=? WHERE id=?');
+        $stmt = $pdo->prepare('UPDATE buildings SET name=?, address=?, fee_type=?, fee_value=?, roof_last_serviced=?, roof_notes=?, electrical_load=?, exterior_paint_color=?, profile_notes=?, reserve_amount=?, maintenance_approval_threshold=? WHERE id=?');
         $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue'], ...$profileFields, $id]);
       } else {
-        $stmt = $pdo->prepare('INSERT INTO buildings (name, address, fee_type, fee_value, roof_last_serviced, roof_notes, electrical_load, exterior_paint_color, profile_notes) VALUES (?,?,?,?,?,?,?,?,?)');
+        $stmt = $pdo->prepare('INSERT INTO buildings (name, address, fee_type, fee_value, roof_last_serviced, roof_notes, electrical_load, exterior_paint_color, profile_notes, reserve_amount, maintenance_approval_threshold) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
         $stmt->execute([$r['name'], $r['address'], $r['feeType'], $r['feeValue'], ...$profileFields]);
         $id = (int)$pdo->lastInsertId();
       }
@@ -626,37 +747,71 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
     case 'ledgerPayment': {
       $id = (int)($r['id'] ?? 0);
       $type = $entity === 'ledgerCharge' ? 'charge' : 'payment';
-      $fields = [$r['leaseId'], $r['date'], $type, $r['category'], $r['amount'], $r['memo'] ?? ''];
+      $paymentMethod = ($type === 'payment' && !empty($r['paymentMethod'])) ? $r['paymentMethod'] : null;
+      $chargeId = ($type === 'payment' && !empty($r['chargeId'])) ? (int)$r['chargeId'] : null;
+      $fields = [$r['leaseId'], $r['date'], $type, $r['category'], $r['amount'], $r['memo'] ?? '', $paymentMethod, $chargeId];
+      $wasEdit = (bool)$id;
       if ($id) {
-        $pdo->prepare('UPDATE ledger SET lease_id=?, date=?, type=?, category=?, amount=?, memo=? WHERE id=?')->execute([...$fields, $id]);
+        // A previously-posted trust/deposit entry is tied to this exact ledger
+        // row (related_ledger_id, ON DELETE CASCADE) — remove it before
+        // re-deriving from the edited amount/category so edits can't leave a
+        // stale trust posting behind.
+        pm_reverse_ledger_trust_posting($pdo, $id);
+        $pdo->prepare('UPDATE ledger SET lease_id=?, date=?, type=?, category=?, amount=?, memo=?, payment_method=?, charge_id=? WHERE id=?')->execute([...$fields, $id]);
       } else {
-        $pdo->prepare('INSERT INTO ledger (lease_id, date, type, category, amount, memo) VALUES (?,?,?,?,?,?)')->execute($fields);
+        $pdo->prepare('INSERT INTO ledger (lease_id, date, type, category, amount, memo, payment_method, charge_id) VALUES (?,?,?,?,?,?,?,?)')->execute($fields);
         $id = (int)$pdo->lastInsertId();
+      }
+      if ($type === 'payment') {
+        pm_post_ledger_payment_trust($pdo, $id, (int)$r['leaseId'], (string)$r['category'], (float)$r['amount'], (string)$r['date']);
       }
       return $id;
     }
     case 'maintenance': {
       $id = (int)($r['id'] ?? 0);
-      $fields = [$r['buildingId'] ?: null, $r['unitId'] ?: null, $r['title'], $r['description'] ?? '', $r['priority'], $r['status'], $r['dateReported'], $r['dateCompleted'] ?: null, $r['cost'] ?: 0, $r['notes'] ?? ''];
+      $buildingId = $r['buildingId'] ?: null;
+      $unitId = $r['unitId'] ?: null;
+      $cost = (float)($r['cost'] ?: 0);
+      $status = $r['status'];
+      $vendorId = $r['vendorId'] ?? null ? (int)$r['vendorId'] : null;
+
+      $existing = null;
       if ($id) {
-        $pdo->prepare('UPDATE maintenance SET building_id=?, unit_id=?, title=?, description=?, priority=?, status=?, date_reported=?, date_completed=?, cost=?, notes=? WHERE id=?')
+        $stmt = $pdo->prepare('SELECT * FROM maintenance WHERE id = ?');
+        $stmt->execute([$id]);
+        $existing = $stmt->fetch();
+      }
+      // Once a human has recorded a decision (approved/denied), leave it in
+      // place on later edits — only a still-undecided record (auto_approved
+      // or pending) gets its approval status re-derived from the building's
+      // threshold, so editing an unrelated field can't silently overturn an
+      // owner's decision.
+      $approvalStatus = $existing ? $existing['approval_status'] : 'auto_approved';
+      if (!$existing || in_array($approvalStatus, ['auto_approved', 'pending'], true)) {
+        $threshold = null;
+        if ($buildingId) {
+          $bstmt = $pdo->prepare('SELECT maintenance_approval_threshold FROM buildings WHERE id = ?');
+          $bstmt->execute([$buildingId]);
+          $t = $bstmt->fetchColumn();
+          $threshold = ($t === false || $t === null) ? null : (float)$t;
+        }
+        $approvalStatus = ($threshold !== null && $cost > $threshold) ? 'pending' : 'auto_approved';
+      }
+
+      $fields = [
+        $buildingId, $unitId, $r['title'], $r['description'] ?? '', $r['priority'], $status,
+        $r['dateReported'], $r['dateCompleted'] ?: null, $cost, $r['notes'] ?? '',
+        $vendorId, $r['invoiceNumber'] ?? '', $r['invoiceDate'] ?: null, $approvalStatus,
+      ];
+      if ($id) {
+        $pdo->prepare('UPDATE maintenance SET building_id=?, unit_id=?, title=?, description=?, priority=?, status=?, date_reported=?, date_completed=?, cost=?, notes=?, vendor_id=?, invoice_number=?, invoice_date=?, approval_status=? WHERE id=?')
           ->execute([...$fields, $id]);
       } else {
-        $pdo->prepare('INSERT INTO maintenance (building_id, unit_id, title, description, priority, status, date_reported, date_completed, cost, notes) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        $pdo->prepare('INSERT INTO maintenance (building_id, unit_id, title, description, priority, status, date_reported, date_completed, cost, notes, vendor_id, invoice_number, invoice_date, approval_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
           ->execute($fields);
         $id = (int)$pdo->lastInsertId();
       }
-      return $id;
-    }
-    case 'ownerLedger': {
-      $id = (int)($r['id'] ?? 0);
-      $fields = [$r['ownerId'], $r['buildingId'], $r['date'], $r['type'], $r['amount'], $r['memo'] ?? ''];
-      if ($id) {
-        $pdo->prepare('UPDATE owner_ledger SET owner_id=?, building_id=?, date=?, type=?, amount=?, memo=? WHERE id=?')->execute([...$fields, $id]);
-      } else {
-        $pdo->prepare('INSERT INTO owner_ledger (owner_id, building_id, date, type, amount, memo) VALUES (?,?,?,?,?,?)')->execute($fields);
-        $id = (int)$pdo->lastInsertId();
-      }
+      pm_post_maintenance_trust_expense($pdo, $id, $buildingId ? (int)$buildingId : null, $status, $cost, $approvalStatus, $r['dateCompleted'] ?: $r['dateReported']);
       return $id;
     }
     case 'communication': {
@@ -687,11 +842,49 @@ function pm_save_entity(PDO $pdo, string $entity, array $r): int {
 }
 
 function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
+  if ($entity === 'ledgerEntry') {
+    pm_reverse_ledger_trust_posting($pdo, $id);
+    $pdo->prepare('DELETE FROM ledger WHERE id = ?')->execute([$id]);
+    return;
+  }
+  if ($entity === 'maintenance') {
+    $stmt = $pdo->prepare('SELECT building_id FROM maintenance WHERE id = ?');
+    $stmt->execute([$id]);
+    $buildingId = $stmt->fetchColumn();
+    $pdo->prepare('DELETE FROM maintenance WHERE id = ?')->execute([$id]); // cascades trust_transactions rows
+    if ($buildingId) pm_recompute_trust_balances_for_building($pdo, (int)$buildingId);
+    return;
+  }
+  if ($entity === 'trustTransaction') {
+    $stmt = $pdo->prepare('SELECT owner_id, building_id, type FROM trust_transactions WHERE id = ?');
+    $stmt->execute([$id]);
+    $row = $stmt->fetch();
+    if (!$row) return;
+    if (!in_array($row['type'], ['fee', 'disbursement', 'adjustment'], true)) {
+      throw new PmUserError('Only manually-posted entries (fee, disbursement, adjustment) can be deleted directly — income and expense postings follow their ledger/maintenance record.');
+    }
+    $pdo->prepare('DELETE FROM trust_transactions WHERE id = ?')->execute([$id]);
+    pm_recompute_trust_balance($pdo, (int)$row['owner_id'], (int)$row['building_id']);
+    return;
+  }
+  if ($entity === 'securityDepositTransaction') {
+    $stmt = $pdo->prepare('SELECT security_deposit_id FROM security_deposit_transactions WHERE id = ?');
+    $stmt->execute([$id]);
+    $depositId = $stmt->fetchColumn();
+    $pdo->prepare('DELETE FROM security_deposit_transactions WHERE id = ?')->execute([$id]);
+    if ($depositId) pm_recompute_security_deposit($pdo, (int)$depositId);
+    return;
+  }
+  if ($entity === 'ownerStatement') {
+    $pdo->prepare('DELETE FROM owner_statements WHERE id = ?')->execute([$id]);
+    return;
+  }
+
   $table = [
     'building' => 'buildings', 'unit' => 'units', 'owner' => 'owners', 'tenant' => 'tenants',
     'vendor' => 'vendors',
-    'lease' => 'leases', 'ledgerEntry' => 'ledger', 'maintenance' => 'maintenance',
-    'ownerLedger' => 'owner_ledger', 'communication' => 'communications', 'tenantComm' => 'tenant_communications',
+    'lease' => 'leases',
+    'communication' => 'communications', 'tenantComm' => 'tenant_communications',
     'appliance' => 'appliances', 'timeEntry' => 'time_entries',
     'room' => 'rooms', 'roomOpening' => 'room_openings', 'stampLog' => 'stamp_log',
   ][$entity] ?? null;
@@ -700,98 +893,452 @@ function pm_delete_entity(PDO $pdo, string $entity, int $id): void {
 }
 
 /* =========================================================
-   Monthly owner fee generation
+   TRUST LEDGER PRIMITIVES
    ========================================================= */
-function pm_generate_fee(PDO $pdo, int $buildingId, string $month): array {
-  $stmt = $pdo->prepare('SELECT * FROM buildings WHERE id = ?');
-  $stmt->execute([$buildingId]);
-  $b = $stmt->fetch();
-  if (!$b) throw new PmUserError("Building not found");
 
-  $monthStart = $month . '-01';
-  $monthEnd = date('Y-m-t', strtotime($monthStart));
-
-  $stmt = $pdo->prepare(
-    'SELECT COALESCE(SUM(l.amount),0) AS total FROM ledger l
-     JOIN leases le ON le.id = l.lease_id
-     JOIN units u ON u.id = le.unit_id
-     WHERE u.building_id = ? AND l.type = "payment" AND l.category = "rent" AND l.date BETWEEN ? AND ?'
-  );
-  $stmt->execute([$buildingId, $monthStart, $monthEnd]);
-  $rentCollected = (float)$stmt->fetch()['total'];
-
-  if ($b['fee_type'] === 'percent') {
-    $fee = $rentCollected * ((float)$b['fee_value'] / 100);
-  } else {
-    $stmt = $pdo->prepare(
-      'SELECT COUNT(*) AS c FROM leases le JOIN units u ON u.id = le.unit_id WHERE u.building_id = ? AND le.status = "active"'
-    );
-    $stmt->execute([$buildingId]);
-    $activeUnits = (int)$stmt->fetch()['c'];
-    $fee = (float)$b['fee_value'] * $activeUnits;
+// Recomputes running_balance for one owner+building's trust_transactions,
+// in date/id order, from scratch. Cheap at this data volume and immune to
+// drift — every write path below calls this after inserting or deleting
+// a row, rather than trying to patch a stored delta.
+function pm_recompute_trust_balance(PDO $pdo, int $ownerId, int $buildingId): void {
+  $stmt = $pdo->prepare('SELECT id, type, amount FROM trust_transactions WHERE owner_id = ? AND building_id = ? ORDER BY date, id');
+  $stmt->execute([$ownerId, $buildingId]);
+  $rows = $stmt->fetchAll();
+  $bal = 0.0;
+  $upd = $pdo->prepare('UPDATE trust_transactions SET running_balance = ? WHERE id = ?');
+  foreach ($rows as $r) {
+    $amt = (float)$r['amount'];
+    if (in_array($r['type'], ['income', 'transfer_in'], true)) $bal += $amt;
+    elseif ($r['type'] === 'adjustment') $bal += $amt; // adjustment amount is signed
+    else $bal -= $amt; // fee, expense, disbursement, transfer_out
+    $bal = round($bal, 2);
+    $upd->execute([$bal, $r['id']]);
   }
+}
 
-  if ($fee <= 0) return ['ok' => false, 'message' => 'Calculated fee is $0 for that month — nothing generated.'];
+function pm_recompute_trust_balances_for_building(PDO $pdo, int $buildingId): void {
+  $stmt = $pdo->prepare('SELECT DISTINCT owner_id FROM trust_transactions WHERE building_id = ?');
+  $stmt->execute([$buildingId]);
+  foreach ($stmt->fetchAll() as $r) {
+    pm_recompute_trust_balance($pdo, (int)$r['owner_id'], $buildingId);
+  }
+}
+
+function pm_trust_balance_as_of(PDO $pdo, int $ownerId, int $buildingId, string $asOfDate): float {
+  $stmt = $pdo->prepare('SELECT running_balance FROM trust_transactions WHERE owner_id = ? AND building_id = ? AND date <= ? ORDER BY date DESC, id DESC LIMIT 1');
+  $stmt->execute([$ownerId, $buildingId, $asOfDate]);
+  $v = $stmt->fetchColumn();
+  return $v === false ? 0.0 : (float)$v;
+}
+
+function pm_post_trust(PDO $pdo, int $ownerId, int $buildingId, string $type, string $category, string $date, float $amount, ?string $memo, ?int $relatedLedgerId = null, ?int $relatedMaintenanceId = null, ?int $relatedTransferId = null): int {
+  $pdo->prepare('INSERT INTO trust_transactions (owner_id, building_id, type, category, date, amount, running_balance, memo, related_ledger_id, related_maintenance_id, related_transfer_id) VALUES (?,?,?,?,?,?,0,?,?,?,?)')
+    ->execute([$ownerId, $buildingId, $type, $category, $date, $amount, $memo, $relatedLedgerId, $relatedMaintenanceId, $relatedTransferId]);
+  $id = (int)$pdo->lastInsertId();
+  pm_recompute_trust_balance($pdo, $ownerId, $buildingId);
+  return $id;
+}
+
+// A tenant ledger *payment* moves real cash: rent/late-fee/utility/other
+// becomes operating trust income for the building's owner(s), split by
+// building_owners.pct — proving each owner's share without touching the
+// pooled bank balance. A 'deposit' payment is deliberately routed to the
+// segregated security_deposits sub-ledger instead (see below) and never
+// reaches trust_transactions at all, so deposit cash can never commingle
+// with operating trust funds even accidentally.
+function pm_post_ledger_payment_trust(PDO $pdo, int $ledgerId, int $leaseId, string $category, float $amount, string $date): void {
+  $stmt = $pdo->prepare('SELECT u.building_id, l.unit_id, l.tenant_id FROM leases l JOIN units u ON u.id = l.unit_id WHERE l.id = ?');
+  $stmt->execute([$leaseId]);
+  $row = $stmt->fetch();
+  if (!$row) return;
+  $buildingId = (int)$row['building_id'];
+
+  if ($category === 'deposit') {
+    pm_receive_security_deposit($pdo, $leaseId, (int)$row['unit_id'], (int)$row['tenant_id'], $buildingId, $amount, $date, $ledgerId);
+    return;
+  }
 
   $stmt = $pdo->prepare('SELECT owner_id, pct FROM building_owners WHERE building_id = ?');
   $stmt->execute([$buildingId]);
   $owners = $stmt->fetchAll();
-  if (!$owners) return ['ok' => false, 'message' => 'This building has no owners assigned yet.'];
+  if (!$owners) return; // no owner assigned yet — nothing to post
 
-  $memo = "Management fee — $month — {$b['name']}";
-  $dupCheck = $pdo->prepare('SELECT COUNT(*) AS c FROM owner_ledger WHERE memo = ?');
-  $dupCheck->execute([$memo]);
-  if ((int)$dupCheck->fetch()['c'] > 0) {
-    return ['ok' => false, 'message' => 'A fee charge with this memo already exists for that building and month.'];
-  }
-
-  $ins = $pdo->prepare('INSERT INTO owner_ledger (owner_id, building_id, date, type, amount, memo) VALUES (?,?,?,?,?,?)');
+  $cat = $category === 'rent' ? 'rent_income' : 'other_income';
   foreach ($owners as $o) {
-    $ins->execute([$o['owner_id'], $buildingId, $monthEnd, 'charge', round($fee * ((float)$o['pct'] / 100), 2), $memo]);
+    $share = round($amount * ((float)$o['pct'] / 100), 2);
+    if ($share == 0.0) continue;
+    pm_post_trust($pdo, (int)$o['owner_id'], $buildingId, 'income', $cat, $date, $share, ucfirst($category) . ' collected', $ledgerId);
   }
+}
 
-  return ['ok' => true, 'message' => "Generated fee charges totalling \$" . number_format($fee, 2) . " across " . count($owners) . " owner(s), based on \$" . number_format($rentCollected, 2) . " in rent collected."];
+// Undoes whatever a ledger row previously caused (a trust income posting,
+// or a security-deposit receipt) before that row is edited or deleted.
+// trust_transactions.related_ledger_id and security_deposit_transactions.
+// related_ledger_id both cascade-delete, so this is just "delete anything
+// tagged with this ledger id, then recompute the balances that changed."
+function pm_reverse_ledger_trust_posting(PDO $pdo, int $ledgerId): void {
+  $stmt = $pdo->prepare('SELECT DISTINCT owner_id, building_id FROM trust_transactions WHERE related_ledger_id = ?');
+  $stmt->execute([$ledgerId]);
+  $affected = $stmt->fetchAll();
+  $stmt = $pdo->prepare('SELECT DISTINCT security_deposit_id FROM security_deposit_transactions WHERE related_ledger_id = ?');
+  $stmt->execute([$ledgerId]);
+  $affectedDeposits = $stmt->fetchAll();
+
+  $pdo->prepare('DELETE FROM trust_transactions WHERE related_ledger_id = ?')->execute([$ledgerId]);
+  $pdo->prepare('DELETE FROM security_deposit_transactions WHERE related_ledger_id = ?')->execute([$ledgerId]);
+
+  foreach ($affected as $a) pm_recompute_trust_balance($pdo, (int)$a['owner_id'], (int)$a['building_id']);
+  foreach ($affectedDeposits as $d) pm_recompute_security_deposit($pdo, (int)$d['security_deposit_id']);
+}
+
+// A completed, non-denied repair is a cash outflow paid on the owner's
+// behalf — it decreases the owner's trust balance, split by pct, same as
+// income does. Re-derives the posting from scratch on every save
+// (delete-by-tag, then re-insert if still eligible) so an edit to cost,
+// status, or approval can't leave a stale expense behind.
+function pm_post_maintenance_trust_expense(PDO $pdo, int $maintenanceId, ?int $buildingId, string $status, float $cost, string $approvalStatus, ?string $date): void {
+  $stmt = $pdo->prepare('SELECT DISTINCT owner_id, building_id FROM trust_transactions WHERE related_maintenance_id = ?');
+  $stmt->execute([$maintenanceId]);
+  $previouslyAffected = $stmt->fetchAll();
+  $pdo->prepare('DELETE FROM trust_transactions WHERE related_maintenance_id = ?')->execute([$maintenanceId]);
+  foreach ($previouslyAffected as $a) pm_recompute_trust_balance($pdo, (int)$a['owner_id'], (int)$a['building_id']);
+
+  $eligible = $status === 'completed' && $cost > 0 && $buildingId && in_array($approvalStatus, ['auto_approved', 'approved'], true);
+  if (!$eligible) return;
+
+  $stmt = $pdo->prepare('SELECT owner_id, pct FROM building_owners WHERE building_id = ?');
+  $stmt->execute([$buildingId]);
+  foreach ($stmt->fetchAll() as $o) {
+    $share = round($cost * ((float)$o['pct'] / 100), 2);
+    if ($share == 0.0) continue;
+    pm_post_trust($pdo, (int)$o['owner_id'], $buildingId, 'expense', 'repair_expense', $date ?: date('Y-m-d'), $share, 'Repair cost', null, $maintenanceId);
+  }
 }
 
 /* =========================================================
-   Stamp billing — turns unbilled stamp_log usage into a single
-   owner_ledger charge and marks those rows as billed
+   SECURITY DEPOSITS — segregated sub-ledger, tied to unit + tenant +
+   lease. Never posted to trust_transactions (see pm_post_ledger_payment_
+   trust above), so operating trust cash and deposit cash can't commingle
+   even by accident.
    ========================================================= */
-function pm_bill_stamps(PDO $pdo, array $body): array {
-  $ids = array_values(array_unique(array_map('intval', $body['ids'] ?? [])));
+function pm_receive_security_deposit(PDO $pdo, int $leaseId, int $unitId, int $tenantId, int $buildingId, float $amount, string $date, ?int $ledgerId): void {
+  $stmt = $pdo->prepare('SELECT id FROM security_deposits WHERE lease_id = ?');
+  $stmt->execute([$leaseId]);
+  $depositId = $stmt->fetchColumn();
+  if (!$depositId) {
+    $pdo->prepare('INSERT INTO security_deposits (lease_id, unit_id, tenant_id, building_id, amount_held, date_received, status) VALUES (?,?,?,?,0,?,"held")')
+      ->execute([$leaseId, $unitId, $tenantId, $buildingId, $date]);
+    $depositId = (int)$pdo->lastInsertId();
+  }
+  $pdo->prepare('INSERT INTO security_deposit_transactions (security_deposit_id, date, type, amount, memo, related_ledger_id) VALUES (?,?,"receipt",?,?,?)')
+    ->execute([$depositId, $date, $amount, 'Deposit received', $ledgerId]);
+  pm_recompute_security_deposit($pdo, (int)$depositId);
+}
+
+function pm_recompute_security_deposit(PDO $pdo, int $depositId): void {
+  $stmt = $pdo->prepare('SELECT type, amount FROM security_deposit_transactions WHERE security_deposit_id = ?');
+  $stmt->execute([$depositId]);
+  $receipts = 0.0; $outflow = 0.0;
+  foreach ($stmt->fetchAll() as $t) {
+    if ($t['type'] === 'receipt') $receipts += (float)$t['amount'];
+    else $outflow += (float)$t['amount'];
+  }
+  $held = round($receipts - $outflow, 2);
+  $status = 'held';
+  if ($held <= 0.005) $status = 'refunded';
+  elseif ($outflow > 0.005) $status = 'partially_refunded';
+  $pdo->prepare('UPDATE security_deposits SET amount_held = ?, status = ? WHERE id = ?')->execute([max(0, $held), $status, $depositId]);
+}
+
+function pm_post_deposit_transaction(PDO $pdo, array $body): array {
+  $depositId = (int)($body['securityDepositId'] ?? 0);
+  $type = (string)($body['type'] ?? '');
+  $amount = (float)($body['amount'] ?? 0);
+  $date = (string)($body['date'] ?? date('Y-m-d'));
+  $memo = (string)($body['memo'] ?? '');
+  if (!$depositId) throw new PmUserError('Choose a security deposit.');
+  if (!in_array($type, ['refund', 'deduction'], true)) throw new PmUserError('Type must be refund or deduction.');
+  if ($amount <= 0) throw new PmUserError('Enter an amount greater than $0.');
+
+  $stmt = $pdo->prepare('SELECT amount_held FROM security_deposits WHERE id = ?');
+  $stmt->execute([$depositId]);
+  $held = $stmt->fetchColumn();
+  if ($held === false) throw new PmUserError('Security deposit not found.');
+  if ($amount > (float)$held + 0.005) throw new PmUserError('That amount is more than the ' . money_fmt((float)$held) . ' currently held.');
+
+  $pdo->prepare('INSERT INTO security_deposit_transactions (security_deposit_id, date, type, amount, memo) VALUES (?,?,?,?,?)')
+    ->execute([$depositId, $date, $type, $amount, $memo ?: null]);
+  pm_recompute_security_deposit($pdo, $depositId);
+
+  return ['ok' => true, 'message' => ucfirst($type) . ' of ' . money_fmt($amount) . ' recorded.'];
+}
+
+/* =========================================================
+   Manual trust entries — admin-only corrections. Income, expense, and
+   transfer postings stay system-generated (from ledger payments,
+   completed repairs, and ownership transfers respectively) so they can't
+   drift from the records that produced them; a manual entry is only ever
+   a management fee, a disbursement, or a flagged adjustment.
+   ========================================================= */
+function pm_post_trust_adjustment(PDO $pdo, array $body): array {
   $ownerId = (int)($body['ownerId'] ?? 0);
-  $buildingId = !empty($body['buildingId']) ? (int)$body['buildingId'] : null;
-  $rate = (float)($body['rate'] ?? 0);
+  $buildingId = (int)($body['buildingId'] ?? 0);
+  $type = (string)($body['type'] ?? '');
+  $date = (string)($body['date'] ?? date('Y-m-d'));
+  $amount = (float)($body['amount'] ?? 0);
+  $memo = (string)($body['memo'] ?? '');
+  if (!$ownerId || !$buildingId) throw new PmUserError('Choose an owner and building.');
+  if (!in_array($type, ['fee', 'disbursement', 'adjustment'], true)) throw new PmUserError('Invalid entry type.');
+  if ($type !== 'adjustment' && $amount <= 0) throw new PmUserError('Enter an amount greater than $0.');
+  if ($type === 'adjustment' && $amount == 0) throw new PmUserError('Enter a non-zero amount.');
 
-  if (!$ownerId) throw new PmUserError('Choose an owner to bill.');
-  if (!$ids) return ['ok' => false, 'message' => 'No unbilled stamp usage matches that filter.'];
-  if ($rate <= 0) throw new PmUserError('Enter a per-stamp rate greater than $0.');
+  $category = $type === 'fee' ? 'manual_fee' : ($type === 'disbursement' ? 'disbursement' : 'adjustment');
+  pm_post_trust($pdo, $ownerId, $buildingId, $type, $category, $date, $amount, $memo ?: null);
+  return ['ok' => true, 'message' => 'Trust entry posted.'];
+}
 
-  $stmt = $pdo->prepare('SELECT id, quantity FROM stamp_log WHERE id IN (' . pm_in_clause($ids) . ') AND billed = 0');
-  $stmt->execute($ids);
-  $rows = $stmt->fetchAll();
-  if (!$rows) return ['ok' => false, 'message' => 'No unbilled stamp usage matches that filter.'];
+/* =========================================================
+   MAINTENANCE APPROVAL — an owner login is otherwise entirely read-only,
+   but gets exactly this one narrow write path, enforced here (not just
+   hidden in the UI): they may decide a *pending* item on a building they
+   own, nothing else.
+   ========================================================= */
+function pm_decide_maintenance_approval(PDO $pdo, array $user, int $id, string $decision): array {
+  if (!in_array($decision, ['approved', 'denied'], true)) throw new PmUserError('Decision must be approved or denied.');
+  $stmt = $pdo->prepare('SELECT * FROM maintenance WHERE id = ?');
+  $stmt->execute([$id]);
+  $m = $stmt->fetch();
+  if (!$m) throw new PmUserError('Maintenance request not found.');
+  if ($m['approval_status'] !== 'pending') throw new PmUserError('This request is not awaiting approval.');
 
-  $qty = array_sum(array_map(fn($r) => (int)$r['quantity'], $rows));
-  $amount = round($qty * $rate, 2);
-  $memo = "Postage — {$qty} stamp(s) @ " . number_format($rate, 2);
-
-  if (!$buildingId) {
-    // owner_ledger requires a building; fall back to any building this owner has a stake in.
-    $bstmt = $pdo->prepare('SELECT building_id FROM building_owners WHERE owner_id = ? LIMIT 1');
-    $bstmt->execute([$ownerId]);
-    $buildingId = (int)($bstmt->fetchColumn() ?: 0);
-    if (!$buildingId) throw new PmUserError('This owner has no building on record to bill against.');
+  if ($user['role'] !== 'admin') {
+    if (!$m['building_id']) throw new PmUserError('Not authorized.');
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM building_owners WHERE building_id = ? AND owner_id = ?');
+    $stmt->execute([$m['building_id'], $user['owner_id']]);
+    if ((int)$stmt->fetchColumn() === 0) throw new PmUserError('Not authorized.');
   }
 
-  $pdo->prepare('INSERT INTO owner_ledger (owner_id, building_id, date, type, amount, memo) VALUES (?,?,CURDATE(),"charge",?,?)')
-    ->execute([$ownerId, $buildingId, $amount, $memo]);
+  $pdo->prepare('UPDATE maintenance SET approval_status = ?, approved_by = ?, approved_at = NOW() WHERE id = ?')
+    ->execute([$decision, $user['id'], $id]);
 
-  $billedIds = array_map(fn($r) => (int)$r['id'], $rows);
-  $pdo->prepare('UPDATE stamp_log SET billed = 1 WHERE id IN (' . pm_in_clause($billedIds) . ')')->execute($billedIds);
+  if ($decision === 'approved') {
+    pm_post_maintenance_trust_expense($pdo, $id, $m['building_id'] ? (int)$m['building_id'] : null, $m['status'], (float)$m['cost'], 'approved', $m['date_completed'] ?: $m['date_reported']);
+  }
 
-  return ['ok' => true, 'message' => "Billed {$qty} stamp(s) — " . money_fmt($amount) . " charged to the owner."];
+  return ['ok' => true, 'message' => 'Request ' . $decision . '.'];
 }
+
+/* =========================================================
+   OWNER STATEMENTS — one generation per owner/building/month rolls the
+   management fee, unbilled postage, and the period's itemized repairs
+   into a single frozen statement, instead of separate fee/stamp-billing
+   actions scattered around the app. Rent/other income and repair costs
+   already post to trust_transactions as they happen (see above) — this
+   function adds the fee and postage for the period, then disburses
+   everything above the building's reserve.
+   ========================================================= */
+function pm_generate_owner_statement(PDO $pdo, int $ownerId, int $buildingId, string $month, array $user, ?float $stampRate): array {
+  $stmt = $pdo->prepare('SELECT pct FROM building_owners WHERE building_id = ? AND owner_id = ?');
+  $stmt->execute([$buildingId, $ownerId]);
+  $pct = $stmt->fetchColumn();
+  if ($pct === false) throw new PmUserError('This owner has no stake in that building.');
+  $pct = (float)$pct;
+
+  $periodStart = $month . '-01';
+  $periodEnd = date('Y-m-t', strtotime($periodStart));
+
+  $dup = $pdo->prepare('SELECT COUNT(*) FROM owner_statements WHERE owner_id = ? AND building_id = ? AND period_start = ? AND period_end = ?');
+  $dup->execute([$ownerId, $buildingId, $periodStart, $periodEnd]);
+  if ((int)$dup->fetchColumn() > 0) {
+    throw new PmUserError('A statement for this owner, building, and month already exists — delete it first to regenerate.');
+  }
+
+  $bstmt = $pdo->prepare('SELECT * FROM buildings WHERE id = ?');
+  $bstmt->execute([$buildingId]);
+  $building = $bstmt->fetch();
+  if (!$building) throw new PmUserError('Building not found.');
+
+  $units = $pdo->prepare('SELECT id, number FROM units WHERE building_id = ?');
+  $units->execute([$buildingId]);
+  $units = $units->fetchAll();
+  $unitIds = array_column($units, 'id');
+
+  $leaseStmt = $pdo->prepare('SELECT id, unit_id, tenant_id FROM leases WHERE unit_id IN (' . pm_in_clause($unitIds) . ')');
+  $leaseStmt->execute($unitIds ?: [0]);
+  $leases = $leaseStmt->fetchAll();
+  $leaseIds = array_column($leases, 'id');
+
+  // Unit-by-unit rent due vs. collected, plus late fees and other income
+  // (pet/parking/utility reimbursement etc.), building-wide.
+  $unitLines = [];
+  $rentDueTotal = 0.0; $rentCollectedTotal = 0.0;
+  foreach ($units as $u) {
+    $unitLeaseIds = array_column(array_filter($leases, fn($l) => $l['unit_id'] == $u['id']), 'id');
+    if (!$unitLeaseIds) { $unitLines[] = ['unit' => $u['number'], 'rentDue' => 0, 'rentCollected' => 0]; continue; }
+    $due = pm_sum_ledger($pdo, $unitLeaseIds, 'charge', 'rent', $periodStart, $periodEnd);
+    $collected = pm_sum_ledger($pdo, $unitLeaseIds, 'payment', 'rent', $periodStart, $periodEnd);
+    $rentDueTotal += $due; $rentCollectedTotal += $collected;
+    $unitLines[] = ['unit' => $u['number'], 'rentDue' => $due, 'rentCollected' => $collected];
+  }
+  $lateFees = pm_sum_ledger($pdo, $leaseIds, 'payment', 'late_fee', $periodStart, $periodEnd);
+  $otherIncomeUtility = pm_sum_ledger($pdo, $leaseIds, 'payment', 'utility', $periodStart, $periodEnd);
+  $otherIncomeOther = pm_sum_ledger($pdo, $leaseIds, 'payment', 'other', $periodStart, $periodEnd);
+  $otherIncome = round($otherIncomeUtility + $otherIncomeOther, 2);
+  $totalCollected = round($rentCollectedTotal + $lateFees + $otherIncome, 2);
+
+  // Management fee for the whole building this period, this owner's share.
+  $rentCollectedForFee = $rentCollectedTotal; // fee always keys off rent actually collected
+  if ($building['fee_type'] === 'percent') {
+    $feeTotal = $rentCollectedForFee * ((float)$building['fee_value'] / 100);
+  } else {
+    $activeStmt = $pdo->prepare("SELECT COUNT(*) FROM leases WHERE unit_id IN (" . pm_in_clause($unitIds) . ") AND status = 'active'");
+    $activeStmt->execute($unitIds ?: [0]);
+    $feeTotal = (float)$building['fee_value'] * (int)$activeStmt->fetchColumn();
+  }
+  $managementFee = round($feeTotal * $pct / 100, 2);
+  if ($managementFee > 0) {
+    pm_post_trust($pdo, $ownerId, $buildingId, 'fee', 'management_fee', $periodEnd, $managementFee, "Management fee — $month");
+  }
+
+  // Unbilled postage rolled into the same statement, if a rate was given.
+  $postageBilled = 0.0; $stampCount = 0;
+  if ($stampRate !== null && $stampRate > 0) {
+    $stmt = $pdo->prepare('SELECT id, quantity FROM stamp_log WHERE billed = 0 AND owner_id = ? AND (building_id = ? OR building_id IS NULL)');
+    $stmt->execute([$ownerId, $buildingId]);
+    $unbilled = $stmt->fetchAll();
+    if ($unbilled) {
+      $stampCount = array_sum(array_map(fn($r) => (int)$r['quantity'], $unbilled));
+      $postageBilled = round($stampCount * $stampRate, 2);
+      pm_post_trust($pdo, $ownerId, $buildingId, 'fee', 'postage', $periodEnd, $postageBilled, "Postage — {$stampCount} stamp(s) @ " . number_format($stampRate, 2));
+      $ids = array_map(fn($r) => (int)$r['id'], $unbilled);
+      $pdo->prepare('UPDATE stamp_log SET billed = 1 WHERE id IN (' . pm_in_clause($ids) . ')')->execute($ids);
+    }
+  }
+
+  // Itemized repairs completed this period (owner's pct share), for
+  // display — these already posted as trust expense when marked completed.
+  $mstmt = $pdo->prepare(
+    "SELECT m.*, v.name AS vendor_name FROM maintenance m LEFT JOIN vendors v ON v.id = m.vendor_id
+     WHERE (m.building_id = ? OR m.unit_id IN (" . pm_in_clause($unitIds) . ")) AND m.status = 'completed'
+       AND m.date_completed BETWEEN ? AND ?"
+  );
+  $mstmt->execute(array_merge([$buildingId], $unitIds ?: [0], [$periodStart, $periodEnd]));
+  $repairRows = $mstmt->fetchAll();
+  $repairItems = [];
+  $repairsTotal = 0.0;
+  foreach ($repairRows as $m) {
+    $share = round((float)$m['cost'] * $pct / 100, 2);
+    $repairsTotal += $share;
+    $repairItems[] = [
+      'date' => $m['date_completed'], 'vendor' => $m['vendor_name'], 'description' => $m['title'],
+      'amount' => $share, 'fullCost' => (float)$m['cost'],
+    ];
+  }
+  $repairsTotal = round($repairsTotal, 2);
+
+  // Any other manually-posted fee/expense/adjustment this period, not
+  // already counted above (management_fee, postage, repair_expense).
+  $stmt = $pdo->prepare(
+    "SELECT COALESCE(SUM(CASE WHEN type IN ('fee','expense') THEN amount WHEN type = 'adjustment' AND amount < 0 THEN -amount ELSE 0 END),0)
+     FROM trust_transactions WHERE owner_id = ? AND building_id = ? AND date BETWEEN ? AND ?
+       AND category NOT IN ('rent_income','other_income','management_fee','postage','repair_expense','disbursement')"
+  );
+  $stmt->execute([$ownerId, $buildingId, $periodStart, $periodEnd]);
+  $otherExpenses = round((float)$stmt->fetchColumn(), 2);
+
+  // Disburse everything above the building's reserve.
+  $currentBalance = pm_trust_balance_as_of($pdo, $ownerId, $buildingId, $periodEnd);
+  $reserve = (float)$building['reserve_amount'];
+  $amountDisbursed = round(max(0, $currentBalance - $reserve), 2);
+  if ($amountDisbursed > 0) {
+    pm_post_trust($pdo, $ownerId, $buildingId, 'disbursement', 'disbursement', $periodEnd, $amountDisbursed, "Disbursement — $month");
+  }
+  $endingBalance = round($currentBalance - $amountDisbursed, 2);
+
+  $lineItems = [
+    'units' => $unitLines,
+    'lateFees' => $lateFees,
+    'otherIncome' => ['utility' => $otherIncomeUtility, 'other' => $otherIncomeOther],
+    'repairs' => $repairItems,
+    'postage' => ['stampCount' => $stampCount, 'amount' => $postageBilled],
+    'ownershipPct' => $pct,
+  ];
+
+  $ins = $pdo->prepare(
+    'INSERT INTO owner_statements
+      (owner_id, building_id, period_start, period_end, rent_due, rent_collected, late_fees_collected, other_income,
+       management_fee, repairs_total, other_expenses, reserve_held, amount_disbursed, ending_trust_balance, line_items, generated_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+  );
+  $ins->execute([
+    $ownerId, $buildingId, $periodStart, $periodEnd, round($rentDueTotal, 2), round($rentCollectedTotal, 2),
+    $lateFees, $otherIncome, $managementFee, $repairsTotal, $otherExpenses, $reserve, $amountDisbursed, $endingBalance,
+    json_encode($lineItems), $user['id'],
+  ]);
+  $id = (int)$pdo->lastInsertId();
+
+  return ['ok' => true, 'id' => $id, 'message' => 'Statement generated for ' . $month . ': ' . money_fmt($totalCollected) . ' collected, ' . money_fmt($amountDisbursed) . ' disbursed, ' . money_fmt($endingBalance) . ' held in trust.'];
+}
+
+function pm_sum_ledger(PDO $pdo, array $leaseIds, string $type, string $category, string $start, string $end): float {
+  if (!$leaseIds) return 0.0;
+  $stmt = $pdo->prepare('SELECT COALESCE(SUM(amount),0) FROM ledger WHERE lease_id IN (' . pm_in_clause($leaseIds) . ') AND type = ? AND category = ? AND date BETWEEN ? AND ?');
+  $stmt->execute(array_merge($leaseIds, [$type, $category, $start, $end]));
+  return round((float)$stmt->fetchColumn(), 2);
+}
+
+/* =========================================================
+   OWNER TRANSFERS — closing out a building sale. Only the trust cash
+   balance and building_owners move; security deposits are keyed to
+   building_id, not owner_id (see security_deposits above), so they
+   already stay attached to the building and need no transfer step —
+   this call records what was on file at the moment of transfer as the
+   disclosure/audit trail for what the incoming owner assumed.
+   ========================================================= */
+function pm_transfer_owner(PDO $pdo, array $user, array $body): array {
+  $buildingId = (int)($body['buildingId'] ?? 0);
+  $fromOwnerId = (int)($body['fromOwnerId'] ?? 0);
+  $toOwnerId = (int)($body['toOwnerId'] ?? 0);
+  $date = (string)($body['transferDate'] ?? date('Y-m-d'));
+  $notes = (string)($body['notes'] ?? '');
+  if (!$buildingId || !$fromOwnerId || !$toOwnerId) throw new PmUserError('Choose the building, outgoing owner, and incoming owner.');
+  if ($fromOwnerId === $toOwnerId) throw new PmUserError('Outgoing and incoming owner must be different.');
+
+  $stmt = $pdo->prepare('SELECT pct FROM building_owners WHERE building_id = ? AND owner_id = ?');
+  $stmt->execute([$buildingId, $fromOwnerId]);
+  $pct = $stmt->fetchColumn();
+  if ($pct === false) throw new PmUserError('That owner has no stake in this building.');
+  $pct = (float)$pct;
+
+  $balance = pm_trust_balance_as_of($pdo, $fromOwnerId, $buildingId, $date);
+
+  $dstmt = $pdo->prepare('SELECT COUNT(*), COALESCE(SUM(amount_held),0) FROM security_deposits WHERE building_id = ? AND status IN ("held","partially_refunded")');
+  $dstmt->execute([$buildingId]);
+  [$depositCount, $depositTotal] = $dstmt->fetch(PDO::FETCH_NUM);
+
+  $pdo->prepare(
+    'INSERT INTO owner_transfers (building_id, from_owner_id, to_owner_id, transfer_date, ownership_pct, trust_balance_transferred, deposits_transferred_count, deposits_transferred_total, notes, created_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?)'
+  )->execute([$buildingId, $fromOwnerId, $toOwnerId, $date, $pct, $balance, (int)$depositCount, (float)$depositTotal, $notes ?: null, $user['id']]);
+  $transferId = (int)$pdo->lastInsertId();
+
+  if (abs($balance) > 0.005) {
+    pm_post_trust($pdo, $fromOwnerId, $buildingId, 'transfer_out', 'transfer', $date, abs($balance), 'Ownership transfer — trust balance out', null, null, $transferId);
+    pm_post_trust($pdo, $toOwnerId, $buildingId, 'transfer_in', 'transfer', $date, abs($balance), 'Ownership transfer — trust balance in', null, null, $transferId);
+  }
+
+  $pdo->prepare('DELETE FROM building_owners WHERE building_id = ? AND owner_id = ?')->execute([$buildingId, $fromOwnerId]);
+  $existing = $pdo->prepare('SELECT id FROM building_owners WHERE building_id = ? AND owner_id = ?');
+  $existing->execute([$buildingId, $toOwnerId]);
+  if ($existing->fetchColumn()) {
+    $pdo->prepare('UPDATE building_owners SET pct = pct + ? WHERE building_id = ? AND owner_id = ?')->execute([$pct, $buildingId, $toOwnerId]);
+  } else {
+    $pdo->prepare('INSERT INTO building_owners (building_id, owner_id, pct) VALUES (?,?,?)')->execute([$buildingId, $toOwnerId, $pct]);
+  }
+
+  return ['ok' => true, 'message' => "Transferred {$pct}% ownership, " . money_fmt($balance) . ' in trust, and disclosed ' . $depositCount . ' security deposit(s) totalling ' . money_fmt((float)$depositTotal) . '.'];
+}
+
 function money_fmt(float $n): string { return '$' . number_format($n, 2); }
 
 /* =========================================================

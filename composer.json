@@ -1,0 +1,13 @@
+{
+  "name": "ledgerstone/ledgerstone",
+  "description": "Ledgerstone property management app — the only Composer dependency is dompdf, used to render owner statements as PDF.",
+  "require": {
+    "php": ">=8.0",
+    "dompdf/dompdf": "^3.0"
+  },
+  "config": {
+    "platform": {
+      "php": "8.0"
+    }
+  }
+}

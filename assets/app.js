@@ -6,7 +6,8 @@
    ========================================================= */
 let DATA = {
   buildings: [], units: [], owners: [], tenants: [], vendors: [], leases: [],
-  ledger: [], maintenance: [], ownerLedger: [], communications: [], tenantCommunications: [],
+  ledger: [], maintenance: [], trustTransactions: [], securityDeposits: [], securityDepositTransactions: [],
+  ownerStatements: [], ownerTransfers: [], communications: [], tenantCommunications: [],
   appliances: [], rooms: [], roomOpenings: [], timeEntries: [], stampLog: []
 };
 let CURRENT_USER = window.PM_USER || {role:'owner'};
@@ -41,8 +42,8 @@ async function loadData(){
     CURRENT_USER = data.currentUser;
     CSRF_TOKEN = data.csrfToken;
     document.body.className = isAdmin() ? 'role-admin' : 'role-owner';
-    if(currentTab==='reports' && !isAdmin() && !ownerReportState.ownerId){
-      ownerReportState.ownerId = String(CURRENT_USER.ownerId||'');
+    if(currentTab==='reports' && !isAdmin() && !statementGenState.ownerId){
+      statementGenState.ownerId = String(CURRENT_USER.ownerId||'');
     }
     if(CURRENT_USER.mustChangePassword){
       forcedPasswordChange = true;
@@ -68,9 +69,13 @@ function pm_normalize_ids(data){
   (data.tenants||[]).forEach(t=>{ t.id=s(t.id); });
   (data.vendors||[]).forEach(v=>{ v.id=s(v.id); });
   (data.leases||[]).forEach(l=>{ l.id=s(l.id); l.unitId=s(l.unitId); l.tenantId=s(l.tenantId); });
-  (data.ledger||[]).forEach(e=>{ e.id=s(e.id); e.leaseId=s(e.leaseId); });
-  (data.maintenance||[]).forEach(m=>{ m.id=s(m.id); m.buildingId=s(m.buildingId); m.unitId=s(m.unitId); });
-  (data.ownerLedger||[]).forEach(e=>{ e.id=s(e.id); e.ownerId=s(e.ownerId); e.buildingId=s(e.buildingId); });
+  (data.ledger||[]).forEach(e=>{ e.id=s(e.id); e.leaseId=s(e.leaseId); e.chargeId=s(e.chargeId); });
+  (data.maintenance||[]).forEach(m=>{ m.id=s(m.id); m.buildingId=s(m.buildingId); m.unitId=s(m.unitId); m.vendorId=s(m.vendorId); m.approvedBy=s(m.approvedBy); });
+  (data.trustTransactions||[]).forEach(e=>{ e.id=s(e.id); e.ownerId=s(e.ownerId); e.buildingId=s(e.buildingId); });
+  (data.securityDeposits||[]).forEach(d=>{ d.id=s(d.id); d.leaseId=s(d.leaseId); d.unitId=s(d.unitId); d.tenantId=s(d.tenantId); d.buildingId=s(d.buildingId); });
+  (data.securityDepositTransactions||[]).forEach(t=>{ t.id=s(t.id); t.securityDepositId=s(t.securityDepositId); });
+  (data.ownerStatements||[]).forEach(st=>{ st.id=s(st.id); st.ownerId=s(st.ownerId); st.buildingId=s(st.buildingId); });
+  (data.ownerTransfers||[]).forEach(tr=>{ tr.id=s(tr.id); tr.buildingId=s(tr.buildingId); tr.fromOwnerId=s(tr.fromOwnerId); tr.toOwnerId=s(tr.toOwnerId); });
   (data.communications||[]).forEach(c=>{ c.id=s(c.id); c.ownerId=s(c.ownerId); c.buildingId=s(c.buildingId); });
   (data.tenantCommunications||[]).forEach(c=>{ c.id=s(c.id); c.tenantId=s(c.tenantId); c.leaseId=s(c.leaseId); });
   (data.appliances||[]).forEach(a=>{ a.id=s(a.id); a.unitId=s(a.unitId); });
@@ -118,6 +123,18 @@ function getOwner(id){ return DATA.owners.find(o=>o.id===id); }
 function getTenant(id){ return DATA.tenants.find(t=>t.id===id); }
 function getVendor(id){ return DATA.vendors.find(v=>v.id===id); }
 function getLease(id){ return DATA.leases.find(l=>l.id===id); }
+function getMaintenance(id){ return DATA.maintenance.find(m=>m.id===id); }
+function depositForLease(leaseId){ return DATA.securityDeposits.find(d=>d.leaseId===leaseId); }
+function trustBalance(ownerId, buildingId){
+  const rows = DATA.trustTransactions.filter(e=>e.ownerId===ownerId && e.buildingId===buildingId);
+  if(!rows.length) return 0;
+  return rows[rows.length-1].runningBalance; // fetched pre-sorted by date,id
+}
+function ownerPctOfBuilding(ownerId, buildingId){
+  const b = getBuilding(buildingId);
+  const o = (b?.owners||[]).find(x=>x.ownerId===ownerId);
+  return o ? Number(o.pct) : 0;
+}
 
 function unitsForBuilding(bid){ return DATA.units.filter(u=>u.buildingId===bid); }
 function activeLeaseForUnit(unitId){ return DATA.leases.find(l=>l.unitId===unitId && l.status==='active'); }
@@ -220,9 +237,9 @@ let filters = { maintBuilding:'', ownerBillBuilding:'', commOwner:'', commBuildi
 let viewingOwnerId = null;
 let viewingTenantId = null;
 let viewingUnitId = null;
-let ownerReportState = { ownerId:'', start:'', end:'' , building:''};
 let arrearsReportState = { asOf: todayISO(), building:'' };
-let feeGenState = { buildingId:'', month: new Date().toISOString().slice(0,7) };
+let statementGenState = { ownerId:'', buildingId:'', month: new Date().toISOString().slice(0,7), stampRate:'' };
+let viewingStatementId = null;
 let timecardFilters = { building:'', activity:'' };
 let timecardReportState = { building:'', start:'', end:'' };
 
@@ -239,7 +256,7 @@ const NAV_TREE = [
     {id:'vendors', label:'Vendors'},
   ]},
   {id:'ledger', label:'Ledger'},
-  {id:'billing', label:'Owner Billing'},
+  {id:'trust', label:'Trust & Deposits'},
   {id:'communications', label:'Communications'},
   {id:'printables', label:'Printables', adminOnly:true},
   {id:'management-group', label:'Management', children:[
@@ -326,7 +343,7 @@ function renderTab(){
     case 'leases': return renderLeases();
     case 'ledger': return renderLedger();
     case 'maintenance': return renderMaintenance();
-    case 'billing': return renderBilling();
+    case 'trust': return renderTrust();
     case 'communications': return renderCommunications();
     case 'printables': return isAdmin() ? renderPrintables() : renderDashboard();
     case 'reports': return renderReports();
@@ -421,6 +438,7 @@ function renderProperties(){
         </div>
         <div class="row">
           <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('unit','add',null,'${b.id}')">+ Unit</button>
+          <button class="btn btn-ghost btn-sm admin-only" onclick="openOwnerTransferModal('${b.id}')">Transfer Ownership</button>
           <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('building','edit','${b.id}')">Edit</button>
           <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete ${esc(b.name)} and all its units? Leases and ledger tied to those units will remain but become unlinked from a building.','deleteBuilding','${b.id}')">Delete</button>
         </div>
@@ -458,6 +476,38 @@ function renderProperties(){
   </div>
   ${blocks || '<div class="panel"><div class="empty">No buildings yet. Add your first one to get started.</div></div>'}
   `;
+}
+
+let ownerTransferDraft = null;
+function openOwnerTransferModal(buildingId){
+  ownerTransferDraft = {buildingId, fromOwnerId:'', toOwnerId:'', transferDate: todayISO(), notes:''};
+  modal = {type:'ownerTransfer', mode:'add'};
+  render();
+}
+async function saveOwnerTransfer(){
+  if(!ownerTransferDraft.fromOwnerId || !ownerTransferDraft.toOwnerId){ alertMsg('Choose the outgoing and incoming owner.'); return; }
+  try{
+    const result = await apiCall('transferOwner', ownerTransferDraft);
+    if(result.ok){ modal=null; ownerTransferDraft=null; await refreshData(); }
+    alertMsg(result.message || 'Done.');
+  }catch(e){ alertMsg('Could not transfer: '+e.message); }
+}
+function ownerTransferForm(){
+  const b = getBuilding(ownerTransferDraft.buildingId);
+  const currentOwnerOpts = (b.owners||[]).map(o=>{
+    const own = getOwner(o.ownerId);
+    return `<option value="${o.ownerId}" ${ownerTransferDraft.fromOwnerId===o.ownerId?'selected':''}>${esc(own?own.name:'?')} (${o.pct}%)</option>`;
+  }).join('');
+  const toOwnerOpts = DATA.owners.filter(o=>o.id!==ownerTransferDraft.fromOwnerId).map(o=>`<option value="${o.id}" ${ownerTransferDraft.toOwnerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
+  const fromBalance = ownerTransferDraft.fromOwnerId ? trustBalance(ownerTransferDraft.fromOwnerId, ownerTransferDraft.buildingId) : null;
+  const depositTotal = DATA.securityDeposits.filter(d=>d.buildingId===ownerTransferDraft.buildingId && d.status!=='refunded').reduce((s,d)=>s+Number(d.amountHeld),0);
+  return `
+  <div class="modal-sub">${esc(b.name)}</div>
+  <div class="field"><label>Outgoing owner</label><select onchange="ownerTransferDraft.fromOwnerId=this.value">${ownerTransferDraft.fromOwnerId?'':'<option value="">— select —</option>'}${currentOwnerOpts}</select></div>
+  <div class="field"><label>Incoming owner</label><select onchange="ownerTransferDraft.toOwnerId=this.value"><option value="">— select —</option>${toOwnerOpts}</select></div>
+  <div class="field"><label>Transfer date</label><input type="date" value="${ownerTransferDraft.transferDate}" oninput="ownerTransferDraft.transferDate=this.value"></div>
+  <div class="field"><label>Notes</label><textarea oninput="ownerTransferDraft.notes=this.value">${esc(ownerTransferDraft.notes||'')}</textarea></div>
+  ${fromBalance!==null? `<div class="subtle">Trust balance to transfer: ${money(fromBalance)}. Security deposits on record for this building (${money(depositTotal)}) automatically stay with the building — the incoming owner assumes responsibility for them without a separate step, and this transfer records both amounts for the audit trail.</div>` : ''}`;
 }
 
 /* =========================================================
@@ -600,12 +650,12 @@ function renderOwnerDetail(id){
     return `<tr><td>${esc(b.name)}</td><td>${esc(b.address||'—')}</td><td class="num">${pct}%</td><td>${esc(feeLine)}</td></tr>`;
   }).join('');
 
-  const billing = DATA.ownerLedger.filter(e=>e.ownerId===o.id).sort((a,b)=>b.date<a.date?-1:1);
-  const balance = billing.reduce((s,e)=> s + (e.type==='charge'?Number(e.amount):-Number(e.amount)), 0);
+  const billing = DATA.trustTransactions.filter(e=>e.ownerId===o.id).sort((a,b)=>b.date<a.date?-1:1 || b.id-a.id);
+  const TRUST_TAG = {income:'tag-good', fee:'tag-bad', expense:'tag-bad', disbursement:'tag-neutral', transfer_in:'tag-good', transfer_out:'tag-bad', adjustment:'tag-neutral'};
   const billingRows = billing.slice(0,25).map(e=>`<tr>
     <td>${fmtDate(e.date)}</td><td>${esc(getBuilding(e.buildingId)?.name||'—')}</td>
-    <td>${e.type==='charge'?'<span class="tag tag-bad">Fee</span>':'<span class="tag tag-good">Payment</span>'}</td>
-    <td>${esc(e.memo||'—')}</td><td class="num">${money(e.amount)}</td>
+    <td><span class="tag ${TRUST_TAG[e.type]||'tag-neutral'}">${esc(e.type.replace('_',' '))}</span></td>
+    <td>${esc(e.memo||'—')}</td><td class="num">${money(e.amount)}</td><td class="num">${money(e.runningBalance)}</td>
   </tr>`).join('');
 
   const comms = DATA.communications.filter(c=>c.ownerId===o.id).sort((a,b)=>b.date<a.date?-1:1);
@@ -628,18 +678,22 @@ function renderOwnerDetail(id){
 
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Buildings owned</div><div class="kpi-value">${stakes.length}</div></div>
-    <div class="kpi"><div class="kpi-label">Balance owed to you</div><div class="kpi-value ${balance>0.5?'bad':''}">${money(balance)}</div></div>
+    <div class="kpi"><div class="kpi-label">Total trust balance</div><div class="kpi-value">${money(stakes.reduce((s,b)=>s+trustBalance(o.id,b.id),0))}</div></div>
     <div class="kpi"><div class="kpi-label">Contacts logged</div><div class="kpi-value">${comms.length}</div></div>
   </div>
 
   <div class="panel">
     <h3>Buildings</h3>
-    ${buildingRows? `<table><thead><tr><th>Building</th><th>Address</th><th class="num">Stake</th><th>Fee</th></tr></thead><tbody>${buildingRows}</tbody></table>` : `<div class="empty">No buildings assigned to this owner yet.</div>`}
+    ${buildingRows? `<table><thead><tr><th>Building</th><th>Address</th><th class="num">Stake</th><th>Fee</th><th class="num">Trust balance</th></tr></thead><tbody>${stakes.map(b=>{
+      const pct = b.owners.find(x=>x.ownerId===o.id).pct;
+      const feeLine = b.feeType==='percent' ? `${b.feeValue}% of collected rent` : `${money(b.feeValue)} / unit / month`;
+      return `<tr><td>${esc(b.name)}</td><td>${esc(b.address||'—')}</td><td class="num">${pct}%</td><td>${esc(feeLine)}</td><td class="num">${money(trustBalance(o.id,b.id))}</td></tr>`;
+    }).join('')}</tbody></table>` : `<div class="empty">No buildings assigned to this owner yet.</div>`}
   </div>
 
   <div class="panel">
-    <h3>Billing ledger</h3>
-    ${billingRows? `<table><thead><tr><th>Date</th><th>Building</th><th>Type</th><th>Memo</th><th class="num">Amount</th></tr></thead><tbody>${billingRows}</tbody></table>` : `<div class="empty">No billing entries yet.</div>`}
+    <h3>Trust ledger</h3>
+    ${billingRows? `<table><thead><tr><th>Date</th><th>Building</th><th>Type</th><th>Memo</th><th class="num">Amount</th><th class="num">Balance</th></tr></thead><tbody>${billingRows}</tbody></table>` : `<div class="empty">No trust activity yet.</div>`}
   </div>
 
   <div class="panel">
@@ -822,11 +876,13 @@ function renderLedger(){
         </tr>`;
       }).join('');
       const bal = leaseBalance(lease.id);
+      const deposit = depositForLease(lease.id);
       body = `
       <div class="row" style="justify-content:space-between;margin-bottom:14px;">
         <div>
           <div style="font-size:15px;font-weight:600;">${esc(getTenant(lease.tenantId)?.name||'?')}</div>
           <div class="subtle">${esc(unitLabel(lease.unitId))} · Rent ${money(lease.rentAmount)}/mo · Lease ${fmtDate(lease.startDate)} → ${lease.endDate?fmtDate(lease.endDate):'open'}</div>
+          <div class="subtle">Security deposit: ${deposit? money(deposit.amountHeld)+' held ('+esc(depositStatusTag(deposit.status).replace(/<[^>]+>/g,''))+')' : 'none on record yet'} <span style="color:var(--ink-soft);">— segregated from this ledger; record it as a payment with category "deposit."</span></div>
         </div>
         <div style="text-align:right;">
           <div class="subtle">Current balance</div>
@@ -873,19 +929,26 @@ function renderMaintenance(){
   const list = DATA.maintenance.filter(m=> !filters.maintBuilding || m.buildingId===filters.maintBuilding)
     .slice().sort((a,b)=> (a.dateReported<b.dateReported?1:-1));
   const buildingOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${filters.maintBuilding===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
-  const rows = list.map(m=>`<tr>
+  const rows = list.map(m=>{
+    const canDecide = m.approvalStatus==='pending' && (isAdmin() || (m.buildingId && ownerPctOfBuilding(CURRENT_USER.ownerId, m.buildingId) > 0));
+    return `<tr>
     <td>${esc(m.title)}</td>
     <td>${esc(m.buildingId?getBuilding(m.buildingId)?.name||'—':'—')}${m.unitId? ' · '+esc(getUnit(m.unitId)?.number||'') : ''}</td>
+    <td>${esc(m.vendorId?getVendor(m.vendorId)?.name||'—':'—')}</td>
     <td>${priorityTag(m.priority)}</td>
     <td>${statusTag(m.status)}</td>
+    <td>${approvalStatusTag(m.approvalStatus)}</td>
     <td>${fmtDate(m.dateReported)}</td>
     <td>${m.dateCompleted?fmtDate(m.dateCompleted):'—'}</td>
     <td class="num">${m.cost?money(m.cost):'—'}</td>
     <td class="row" style="justify-content:flex-end;">
+      ${canDecide? `<button class="btn btn-sm" style="background:var(--good,#2a8f5a);color:#fff;" onclick="decideMaintenanceApproval('${m.id}','approved')">Approve</button>
+      <button class="btn-danger btn btn-sm" onclick="decideMaintenanceApproval('${m.id}','denied')">Deny</button>` : ''}
       <button class="btn btn-ghost btn-sm admin-only" onclick="openModal('maintenance','edit','${m.id}')">Edit</button>
       <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this maintenance request?','deleteMaintenance','${m.id}')">Delete</button>
     </td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   return `
   <div class="page-head">
     <div><h1 class="page-title">Maintenance</h1><div class="page-sub">Requests and repair tracking across your buildings</div></div>
@@ -895,85 +958,163 @@ function renderMaintenance(){
     <select onchange="filters.maintBuilding=this.value;render();"><option value="">All buildings</option>${buildingOptions}</select>
   </div>
   <div class="panel">
-    ${list.length? `<table><thead><tr><th>Title</th><th>Location</th><th>Priority</th><th>Status</th><th>Reported</th><th>Completed</th><th class="num">Cost</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No maintenance requests.</div>`}
+    ${list.length? `<table><thead><tr><th>Title</th><th>Location</th><th>Vendor</th><th>Priority</th><th>Status</th><th>Approval</th><th>Reported</th><th>Completed</th><th class="num">Cost</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No maintenance requests.</div>`}
   </div>`;
 }
 
 /* =========================================================
-   OWNER BILLING (management fees)
+   TRUST & DEPOSITS — the owner trust cash ledger (segregated from
+   security deposits) per owner/building, plus the deposit sub-ledger.
+   Management fees, postage, and disbursements are no longer generated
+   here as separate actions — they're rolled into one statement per
+   owner per month from Reports → Owner Statements, so an owner gets a
+   single monthly invoice instead of several scattered charges.
    ========================================================= */
-function renderBilling(){
-  const buildingOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${feeGenState.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
-  const ownerFilterOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${filters.ownerBillBuilding===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+function renderTrust(){
+  if(viewingUnitId){} // no-op, keeps this function symmetrical with others that branch on a detail view
+  const buildingFilterOptions = DATA.buildings.map(b=>`<option value="${b.id}" ${filters.ownerBillBuilding===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
 
-  const list = DATA.ownerLedger.filter(e=> !filters.ownerBillBuilding || e.buildingId===filters.ownerBillBuilding)
-    .slice().sort((a,b)=> b.date<a.date?-1:1);
-  const rows = list.map(e=>`<tr>
+  const trustRows = DATA.trustTransactions.filter(e=> !filters.ownerBillBuilding || e.buildingId===filters.ownerBillBuilding)
+    .slice().sort((a,b)=> b.date<a.date?-1:1 || b.id-a.id);
+  const TYPE_TAG = {
+    income:'<span class="tag tag-good">Income</span>', fee:'<span class="tag tag-bad">Fee</span>',
+    expense:'<span class="tag tag-bad">Expense</span>', disbursement:'<span class="tag tag-neutral">Disbursed</span>',
+    transfer_in:'<span class="tag tag-good">Transfer in</span>', transfer_out:'<span class="tag tag-bad">Transfer out</span>',
+    adjustment:'<span class="tag tag-neutral">Adjustment</span>',
+  };
+  const rows = trustRows.slice(0,80).map(e=>`<tr>
     <td>${fmtDate(e.date)}</td>
     <td>${esc(getOwner(e.ownerId)?.name||'—')}</td>
     <td>${esc(getBuilding(e.buildingId)?.name||'—')}</td>
-    <td>${e.type==='charge'?'<span class="tag tag-bad">Fee charged</span>':'<span class="tag tag-good">Payment received</span>'}</td>
+    <td>${TYPE_TAG[e.type]||e.type}</td>
     <td>${esc(e.memo||'—')}</td>
     <td class="num">${money(e.amount)}</td>
+    <td class="num">${money(e.runningBalance)}</td>
     <td class="row" style="justify-content:flex-end;">
-      <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this billing entry?','deleteOwnerLedgerEntry','${e.id}')">Delete</button>
+      ${['fee','disbursement','adjustment'].includes(e.type) ? `<button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this manual entry?','deleteTrustTransaction','${e.id}')">Delete</button>` : ''}
     </td>
   </tr>`).join('');
 
-  // running balance owed by each owner (charges - payments), across all buildings
-  const balances = {};
-  DATA.ownerLedger.forEach(e=>{
-    balances[e.ownerId] = (balances[e.ownerId]||0) + (e.type==='charge'?Number(e.amount):-Number(e.amount));
-  });
-  const balanceRows = DATA.owners.map(o=>`<tr><td>${esc(o.name)}</td><td class="num ${balances[o.id]>0.5?'balance-pos':''}">${money(balances[o.id]||0)}</td></tr>`).join('');
+  // current balance per owner/building pair
+  const balanceKeys = {};
+  DATA.trustTransactions.forEach(e=>{ balanceKeys[e.ownerId+'|'+e.buildingId] = e; });
+  const balanceRows = Object.values(balanceKeys).map(e=>`<tr>
+    <td>${esc(getOwner(e.ownerId)?.name||'—')}</td><td>${esc(getBuilding(e.buildingId)?.name||'—')}</td>
+    <td class="num">${money(e.runningBalance)}</td>
+  </tr>`).join('');
+
+  const depositRows = DATA.securityDeposits.slice().sort((a,b)=> b.dateReceived<a.dateReceived?-1:1).map(d=>{
+    const lease = getLease(d.leaseId);
+    return `<tr>
+      <td>${esc(getTenant(d.tenantId)?.name||'—')}</td>
+      <td>${esc(unitLabel(d.unitId))}</td>
+      <td>${fmtDate(d.dateReceived)}</td>
+      <td class="num">${money(d.amountHeld)}</td>
+      <td>${depositStatusTag(d.status)}</td>
+      <td class="row" style="justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm admin-only" onclick="openDepositTxModal('${d.id}')">Refund / Deduct</button>
+      </td>
+    </tr>`;
+  }).join('');
+  const depositTotal = DATA.securityDeposits.reduce((s,d)=>s+Number(d.amountHeld),0);
 
   return `
   <div class="page-head">
-    <div><h1 class="page-title">Owner Billing</h1><div class="page-sub">Management fees you charge building owners, and what they've paid</div></div>
-    <button class="btn admin-only" onclick="openModal('ownerLedger','add')">+ Manual Entry</button>
-  </div>
-
-  <div class="panel">
-    <h3>Generate monthly management fee</h3>
-    <div class="row" style="align-items:flex-end;">
-      <div class="field" style="min-width:220px;">
-        <label>Building</label>
-        <select onchange="feeGenState.buildingId=this.value;">
-          <option value="">— choose —</option>${buildingOptions}
-        </select>
-      </div>
-      <div class="field" style="min-width:160px;">
-        <label>Month</label>
-        <input type="month" value="${feeGenState.month}" oninput="feeGenState.month=this.value;">
-      </div>
-      <button class="btn" onclick="generateMonthlyFee()">Generate Fee Charges</button>
-    </div>
-    <div class="subtle">Calculates rent collected that month for the building, applies the building's fee rate, and splits the charge across its owners by ownership %.</div>
+    <div><h1 class="page-title">Trust &amp; Deposits</h1><div class="page-sub">Each owner's share of pooled trust cash, kept separate from tenant security deposits</div></div>
+    <button class="btn btn-ghost admin-only" onclick="openTrustAdjustmentModal()">+ Manual Entry</button>
   </div>
 
   <div class="row" style="align-items:flex-start;gap:20px;">
     <div class="panel" style="flex:2;min-width:400px;">
-      <h3>Billing ledger</h3>
-      <div class="filter-bar"><select onchange="filters.ownerBillBuilding=this.value;render();"><option value="">All buildings</option>${ownerFilterOptions}</select></div>
-      ${list.length? `<table><thead><tr><th>Date</th><th>Owner</th><th>Building</th><th>Type</th><th>Memo</th><th class="num">Amount</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No billing entries yet.</div>`}
+      <h3>Trust ledger</h3>
+      <div class="filter-bar"><select onchange="filters.ownerBillBuilding=this.value;render();"><option value="">All buildings</option>${buildingFilterOptions}</select></div>
+      ${rows.length? `<table><thead><tr><th>Date</th><th>Owner</th><th>Building</th><th>Type</th><th>Memo</th><th class="num">Amount</th><th class="num">Balance</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : `<div class="empty">No trust activity yet — it fills in automatically as rent is collected, fees are billed, and repairs complete.</div>`}
     </div>
     <div class="panel" style="flex:1;min-width:260px;">
-      <h3>Balance owed, by owner</h3>
-      ${DATA.owners.length? `<table><thead><tr><th>Owner</th><th class="num">Owes</th></tr></thead><tbody>${balanceRows}</tbody></table>` : `<div class="empty">No owners yet.</div>`}
+      <h3>Current trust balance, by owner &amp; building</h3>
+      ${balanceRows? `<table><thead><tr><th>Owner</th><th>Building</th><th class="num">Balance</th></tr></thead><tbody>${balanceRows}</tbody></table>` : `<div class="empty">No owners yet.</div>`}
+      <div class="subtle" style="margin-top:8px;">Management fees, postage, and disbursements post together once per month — see Reports → Owner Statements.</div>
     </div>
+  </div>
+
+  <div class="panel">
+    <div class="page-head" style="margin-bottom:10px;">
+      <h3 style="margin:0;">Security deposits held</h3>
+      <div class="kpi-value" style="font-size:18px;">${money(depositTotal)}</div>
+    </div>
+    <div class="subtle" style="margin-bottom:10px;">Segregated from the trust ledger above — tied to unit, tenant, and lease, and automatically stays with the building if it's sold.</div>
+    ${depositRows.length? `<table><thead><tr><th>Tenant</th><th>Unit</th><th>Received</th><th class="num">Held</th><th>Status</th><th></th></tr></thead><tbody>${depositRows}</tbody></table>` : `<div class="empty">No security deposits recorded yet — record one on the tenant ledger as a payment with category "deposit."</div>`}
   </div>`;
 }
+function depositStatusTag(s){
+  const map = {held:'tag-good', partially_refunded:'tag-warn', refunded:'tag-neutral', applied:'tag-neutral'};
+  const label = {held:'Held', partially_refunded:'Partially refunded', refunded:'Refunded', applied:'Applied'}[s]||s;
+  return `<span class="tag ${map[s]||'tag-neutral'}">${esc(label)}</span>`;
+}
 
-async function generateMonthlyFee(){
-  if(!feeGenState.buildingId){ alertMsg('Choose a building first.'); return; }
-  if(!feeGenState.month){ alertMsg('Choose a month.'); return; }
+let depositTxDraft = null;
+function openDepositTxModal(depositId){
+  depositTxDraft = {securityDepositId: depositId, type:'refund', amount:0, date: todayISO(), memo:''};
+  modal = {type:'depositTx', mode:'add'};
+  render();
+}
+async function saveDepositTx(){
   try{
-    const result = await apiCall('generateFee', {buildingId:feeGenState.buildingId, month:feeGenState.month});
-    if(result.ok){ await refreshData(); }
-    alertMsg(result.message || 'Done.');
-  }catch(e){
-    alertMsg('Could not generate fee: '+e.message);
-  }
+    const result = await apiCall('postDepositTransaction', depositTxDraft);
+    if(result.ok){ modal=null; depositTxDraft=null; await refreshData(); alertMsg(result.message); }
+    else alertMsg(result.message||'Could not save.');
+  }catch(e){ alertMsg('Could not save: '+e.message); }
+}
+function depositTxForm(){
+  const d = DATA.securityDeposits.find(x=>x.id===depositTxDraft.securityDepositId);
+  return `
+  <div class="modal-sub">${esc(getTenant(d.tenantId)?.name||'')} — ${esc(unitLabel(d.unitId))} · currently holding ${money(d.amountHeld)}</div>
+  <div class="field"><label>Type</label>
+    <select onchange="depositTxDraft.type=this.value">
+      <option value="refund" ${depositTxDraft.type==='refund'?'selected':''}>Refund to tenant</option>
+      <option value="deduction" ${depositTxDraft.type==='deduction'?'selected':''}>Deduction (damage, unpaid balance, etc.)</option>
+    </select>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Date</label><input type="date" value="${depositTxDraft.date}" oninput="depositTxDraft.date=this.value"></div>
+    <div class="field"><label>Amount</label><input type="number" step="0.01" value="${depositTxDraft.amount}" oninput="depositTxDraft.amount=Number(this.value)"></div>
+  </div>
+  <div class="field"><label>Memo</label><input value="${esc(depositTxDraft.memo)}" oninput="depositTxDraft.memo=this.value" placeholder="e.g. Carpet replacement"></div>`;
+}
+
+let trustAdjDraft = null;
+function openTrustAdjustmentModal(){
+  trustAdjDraft = {ownerId:'', buildingId:'', type:'fee', date: todayISO(), amount:0, memo:''};
+  modal = {type:'trustAdjustment', mode:'add'};
+  render();
+}
+async function saveTrustAdjustment(){
+  try{
+    const result = await apiCall('postTrustAdjustment', trustAdjDraft);
+    if(result.ok){ modal=null; trustAdjDraft=null; await refreshData(); alertMsg(result.message); }
+    else alertMsg(result.message||'Could not save.');
+  }catch(e){ alertMsg('Could not save: '+e.message); }
+}
+function trustAdjustmentForm(){
+  const oOpts = DATA.owners.map(o=>`<option value="${o.id}" ${trustAdjDraft.ownerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
+  const bOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${trustAdjDraft.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
+  return `
+  <div class="field-row">
+    <div class="field"><label>Owner</label><select onchange="trustAdjDraft.ownerId=this.value">${trustAdjDraft.ownerId?'':'<option value="">— select —</option>'}${oOpts}</select></div>
+    <div class="field"><label>Building</label><select onchange="trustAdjDraft.buildingId=this.value">${trustAdjDraft.buildingId?'':'<option value="">— select —</option>'}${bOpts}</select></div>
+  </div>
+  <div class="field"><label>Type</label>
+    <select onchange="trustAdjDraft.type=this.value">
+      <option value="fee" ${trustAdjDraft.type==='fee'?'selected':''}>Fee (decreases balance)</option>
+      <option value="disbursement" ${trustAdjDraft.type==='disbursement'?'selected':''}>Disbursement (decreases balance)</option>
+      <option value="adjustment" ${trustAdjDraft.type==='adjustment'?'selected':''}>Adjustment (can be negative)</option>
+    </select>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Date</label><input type="date" value="${trustAdjDraft.date}" oninput="trustAdjDraft.date=this.value"></div>
+    <div class="field"><label>Amount</label><input type="number" step="0.01" value="${trustAdjDraft.amount}" oninput="trustAdjDraft.amount=Number(this.value)"></div>
+  </div>
+  <div class="field"><label>Memo</label><input value="${esc(trustAdjDraft.memo)}" oninput="trustAdjDraft.memo=this.value"></div>`;
 }
 
 function alertMsg(msg){
@@ -1079,6 +1220,7 @@ function renderCommunications(){
    REPORTS
    ========================================================= */
 function renderReports(){
+  if(viewingStatementId) return renderOwnerReport();
   return `
   <div class="page-head">
     <div><h1 class="page-title">Reports</h1><div class="page-sub">Owner statements and arrears, on demand</div></div>
@@ -1089,86 +1231,112 @@ function renderReports(){
 }
 
 function renderOwnerReport(){
-  if(!isAdmin() && !ownerReportState.ownerId){ ownerReportState.ownerId = String(CURRENT_USER.ownerId||''); }
-  const ownerOptions = DATA.owners.map(o=>`<option value="${o.id}" ${String(ownerReportState.ownerId)===String(o.id)?'selected':''}>${esc(o.name)}</option>`).join('');
-  let content = '<div class="empty">Choose an owner and a date range.</div>';
-  if(ownerReportState.ownerId && ownerReportState.start && ownerReportState.end){
-    const owner = getOwner(ownerReportState.ownerId);
-    const stakeBuildings = DATA.buildings.filter(b=>(b.owners||[]).some(o=>o.ownerId===owner.id));
-    const asOf = ownerReportState.end;
-    let grandNet = 0;
+  if(viewingStatementId) return renderStatementDetail(viewingStatementId);
+  if(!isAdmin() && !statementGenState.ownerId){ statementGenState.ownerId = String(CURRENT_USER.ownerId||''); }
+  const ownerOptions = DATA.owners.map(o=>`<option value="${o.id}" ${String(statementGenState.ownerId)===String(o.id)?'selected':''}>${esc(o.name)}</option>`).join('');
+  const ownerBuildings = statementGenState.ownerId ? DATA.buildings.filter(b=>(b.owners||[]).some(o=>o.ownerId===statementGenState.ownerId)) : [];
+  const buildingOptions = ownerBuildings.map(b=>`<option value="${b.id}" ${statementGenState.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
 
-    const buildingBlocks = stakeBuildings.map(b=>{
-      const pct = b.owners.find(o=>o.ownerId===owner.id).pct;
-      const units = unitsForBuilding(b.id);
-      const unitIds = units.map(u=>u.id);
-      const leaseIds = DATA.leases.filter(l=>unitIds.includes(l.unitId)).map(l=>l.id);
-      const activeLeases = DATA.leases.filter(l=>unitIds.includes(l.unitId) && l.status==='active');
+  const visibleStatements = isAdmin() ? DATA.ownerStatements : DATA.ownerStatements.filter(s=>s.ownerId===CURRENT_USER.ownerId);
+  const statementRows = visibleStatements.slice(0,25).map(s=>`<tr>
+    <td>${fmtDate(s.periodStart).replace(/\d+,\s/,'')}</td>
+    <td>${esc(getOwner(s.ownerId)?.name||'—')}</td>
+    <td>${esc(getBuilding(s.buildingId)?.name||'—')}</td>
+    <td class="num">${money(s.rentCollected+s.lateFeesCollected+s.otherIncome)}</td>
+    <td class="num">${money(s.managementFee+s.repairsTotal+s.otherExpenses)}</td>
+    <td class="num" style="font-weight:600;">${money(s.amountDisbursed)}</td>
+    <td class="row" style="justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="viewingStatementId='${s.id}';render();">View</button>
+      <a class="btn btn-ghost btn-sm" href="owner_statement_pdf.php?id=${s.id}" target="_blank" style="text-decoration:none;">PDF</a>
+      <button class="btn-danger btn btn-sm admin-only" onclick="askDelete('Delete this statement? This does not reverse the fee/postage/disbursement it posted to the trust ledger.','deleteOwnerStatement','${s.id}')">Delete</button>
+    </td>
+  </tr>`).join('');
 
-      const rent = DATA.ledger.filter(e=>e.type==='payment' && e.category==='rent' && leaseIds.includes(e.leaseId) && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
-      const otherIncome = DATA.ledger.filter(e=>e.type==='payment' && e.category!=='rent' && leaseIds.includes(e.leaseId) && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
-      const gross = rent + otherIncome;
-
-      const completedMaint = DATA.maintenance.filter(m=>m.buildingId===b.id && m.status==='completed' && isDateInRange(m.dateCompleted, ownerReportState.start, ownerReportState.end));
-      const maint = completedMaint.reduce((s,m)=>s+Number(m.cost||0),0);
-      const openMaint = DATA.maintenance.filter(m=>{
-        if(m.status==='completed') return false;
-        return m.buildingId===b.id || unitIds.includes(m.unitId);
-      });
-
-      const occupied = units.filter(u=>activeLeaseForUnit(u.id)).length;
-      const vacant = units.length - occupied;
-
-      const arrears = activeLeases.reduce((s,l)=> s + Math.max(0, fifoAging(l.id, asOf).balance), 0);
-
-      const projectedAnnualRent = activeLeases.reduce((s,l)=>s+Number(l.rentAmount),0) * 12;
-
-      const netOperating = gross - maint;
-      const ownerGross = gross * pct/100;
-      const ownerMaint = maint * pct/100;
-      const ownerNetOperating = netOperating * pct/100;
-      const fee = DATA.ownerLedger.filter(e=>e.ownerId===owner.id && e.buildingId===b.id && e.type==='charge' && isDateInRange(e.date, ownerReportState.start, ownerReportState.end)).reduce((s,e)=>s+Number(e.amount),0);
-      const netToOwner = ownerNetOperating - fee;
-      grandNet += netToOwner;
-
-      const maintRows = completedMaint.map(m=>`<tr><td>${fmtDate(m.dateCompleted)}</td><td>${esc(m.title)}</td><td>${esc(m.unitId?getUnit(m.unitId)?.number||'—':'Whole building')}</td><td class="num">${money(m.cost||0)}</td></tr>`).join('');
-
-      return `
-      <div class="building-block">
-        <div class="building-head"><h4>${esc(b.name)} <span class="subtle">(${pct}% stake)</span></h4></div>
-        <div style="padding:14px 16px;">
-          <div class="kpi-grid">
-            <div class="kpi"><div class="kpi-label">Units occupied / vacant</div><div class="kpi-value">${occupied} / ${vacant}</div></div>
-            <div class="kpi"><div class="kpi-label">Rent &amp; other income</div><div class="kpi-value">${money(gross)}</div></div>
-            <div class="kpi"><div class="kpi-label">Outstanding arrears</div><div class="kpi-value ${arrears>0.5?'bad':''}">${money(arrears)}</div></div>
-            <div class="kpi"><div class="kpi-label">Open maintenance</div><div class="kpi-value">${openMaint.length}</div></div>
-            <div class="kpi"><div class="kpi-label">Projected annual rent roll</div><div class="kpi-value">${money(projectedAnnualRent)}</div></div>
-            <div class="kpi"><div class="kpi-label">Net to owner, this period</div><div class="kpi-value ${netToOwner<0?'bad':'good'}">${money(netToOwner)}</div></div>
-          </div>
-          <table style="margin-bottom:10px;"><thead><tr><th></th><th class="num">Owner's Gross Income</th><th class="num">Owner's Maint. Share</th><th class="num">Mgmt Fee</th><th class="num">Net to Owner</th></tr></thead>
-          <tbody><tr><td>${esc(b.name)}</td><td class="num">${money(ownerGross)}</td><td class="num">${money(ownerMaint)}</td><td class="num">${money(fee)}</td><td class="num" style="font-weight:600;">${money(netToOwner)}</td></tr></tbody></table>
-          <div class="subtle" style="margin-bottom:6px;text-transform:uppercase;letter-spacing:.03em;font-size:11.5px;">Repairs completed this period</div>
-          ${maintRows? `<table><thead><tr><th>Date</th><th>Item</th><th>Unit</th><th class="num">Cost</th></tr></thead><tbody>${maintRows}</tbody></table>` : `<div class="empty">No repairs completed in this period.</div>`}
-        </div>
-      </div>`;
-    }).join('');
-
-    content = `
-    ${buildingBlocks || '<div class="panel"><div class="empty">This owner has no building stakes.</div></div>'}
-    ${stakeBuildings.length? `<div class="panel"><table><tbody><tr class="report-total-row"><td>Total, ${esc(owner.name)} — all buildings</td><td class="num">${money(grandNet)}</td></tr></tbody></table></div>` : ''}`;
-  }
   return `
-  <div class="panel">
-    <h3>Owner statement</h3>
-    <div class="page-sub" style="margin:-6px 0 14px;">A full-picture monthly statement — run it for the past month and print or save it to send to the owner.</div>
-    <div class="row" style="align-items:flex-end;margin-bottom:14px;">
-      <div class="field" style="min-width:200px;"><label>Owner</label><select onchange="ownerReportState.ownerId=this.value;render();"><option value="">— choose —</option>${ownerOptions}</select></div>
-      <div class="field" style="min-width:150px;"><label>Start</label><input type="date" value="${ownerReportState.start}" oninput="ownerReportState.start=this.value;"></div>
-      <div class="field" style="min-width:150px;"><label>End</label><input type="date" value="${ownerReportState.end}" oninput="ownerReportState.end=this.value;"></div>
-      <button class="btn btn-ghost" onclick="render()">Run</button>
-      <button class="btn-ghost btn no-print" onclick="window.print()">Print</button>
+  ${isAdmin() ? `<div class="panel">
+    <h3>Generate owner statement</h3>
+    <div class="page-sub" style="margin:-6px 0 14px;">One statement per owner per building per month — it rolls the management fee, any unbilled postage, and the period's completed repairs into a single invoice, then discloses whatever's disbursed above the building's reserve.</div>
+    <div class="row" style="align-items:flex-end;margin-bottom:6px;">
+      <div class="field" style="min-width:200px;"><label>Owner</label><select onchange="statementGenState.ownerId=this.value;statementGenState.buildingId='';render();"><option value="">— choose —</option>${ownerOptions}</select></div>
+      <div class="field" style="min-width:200px;"><label>Building</label><select onchange="statementGenState.buildingId=this.value;"><option value="">— choose —</option>${buildingOptions}</select></div>
+      <div class="field" style="min-width:150px;"><label>Month</label><input type="month" value="${statementGenState.month}" oninput="statementGenState.month=this.value;"></div>
+      <div class="field" style="min-width:150px;"><label>Postage rate (optional)</label><input type="number" step="0.01" placeholder="e.g. 0.68" value="${statementGenState.stampRate}" oninput="statementGenState.stampRate=this.value;"></div>
+      <button class="btn" onclick="generateOwnerStatement()">Generate</button>
     </div>
-    ${content}
+    <div class="subtle">Leave the postage rate blank to skip billing unbilled stamps this cycle — they'll roll into the next statement instead.</div>
+  </div>` : ''}
+
+  <div class="panel">
+    <h3>Owner statements</h3>
+    ${statementRows? `<table><thead><tr><th>Month</th><th>Owner</th><th>Building</th><th class="num">Collected</th><th class="num">Expenses</th><th class="num">Disbursed</th><th></th></tr></thead><tbody>${statementRows}</tbody></table>` : `<div class="empty">No statements generated yet.</div>`}
+  </div>`;
+}
+
+async function generateOwnerStatement(){
+  if(!statementGenState.ownerId || !statementGenState.buildingId){ alertMsg('Choose an owner and building.'); return; }
+  if(!statementGenState.month){ alertMsg('Choose a month.'); return; }
+  try{
+    const result = await apiCall('generateOwnerStatement', {
+      ownerId: statementGenState.ownerId, buildingId: statementGenState.buildingId,
+      month: statementGenState.month, stampRate: statementGenState.stampRate,
+    });
+    if(result.ok){ await refreshData(); viewingStatementId = String(result.id); }
+    alertMsg(result.message || 'Done.');
+  }catch(e){
+    alertMsg('Could not generate statement: '+e.message);
+  }
+}
+
+function renderStatementDetail(id){
+  const s = DATA.ownerStatements.find(x=>x.id===id);
+  if(!s){ viewingStatementId=null; return renderOwnerReport(); }
+  const li = s.lineItems||{};
+  const unitRows = (li.units||[]).map(u=>`<tr><td>${esc(u.unit)}</td><td class="num">${money(u.rentDue)}</td><td class="num">${money(u.rentCollected)}</td></tr>`).join('');
+  const repairRows = (li.repairs||[]).map(r=>`<tr><td>${fmtDate(r.date)}</td><td>${esc(r.vendor||'—')}</td><td>${esc(r.description)}</td><td class="num">${money(r.amount)}</td></tr>`).join('');
+  const totalCollected = s.rentCollected + s.lateFeesCollected + s.otherIncome;
+  const totalExpenses = s.managementFee + s.repairsTotal + (li.postage?.amount||0) + s.otherExpenses;
+  return `
+  <div class="page-head">
+    <div>
+      <span class="mini-link no-print" onclick="viewingStatementId=null;render();">← Back to statements</span>
+      <h1 class="page-title" style="margin-top:6px;">${esc(getBuilding(s.buildingId)?.name||'?')}</h1>
+      <div class="page-sub">${esc(getOwner(s.ownerId)?.name||'')} · ${fmtDate(s.periodStart)} – ${fmtDate(s.periodEnd)}</div>
+    </div>
+    <div class="row no-print">
+      <button class="btn btn-ghost" onclick="window.print()">Print</button>
+      <a class="btn" href="owner_statement_pdf.php?id=${s.id}" target="_blank" style="text-decoration:none;">Download PDF</a>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Income</h3>
+    <table><thead><tr><th>Unit</th><th class="num">Rent Due</th><th class="num">Rent Collected</th></tr></thead><tbody>
+      ${unitRows}
+      <tr class="report-total-row"><td>Total</td><td class="num">${money(s.rentDue)}</td><td class="num">${money(s.rentCollected)}</td></tr>
+    </tbody></table>
+    <table style="margin-top:10px;"><tbody>
+      <tr><td>Late fees collected</td><td class="num">${money(s.lateFeesCollected)}</td></tr>
+      <tr><td>Other income (pet / parking / utility reimbursement, etc.)</td><td class="num">${money(s.otherIncome)}</td></tr>
+      <tr class="report-total-row"><td>Total collected</td><td class="num">${money(totalCollected)}</td></tr>
+    </tbody></table>
+  </div>
+  <div class="panel">
+    <h3>Expenses</h3>
+    <table><tbody><tr><td>Management fee</td><td class="num">${money(s.managementFee)}</td></tr></tbody></table>
+    ${repairRows? `<table style="margin-top:10px;"><thead><tr><th>Date</th><th>Vendor</th><th>Description</th><th class="num">Amount</th></tr></thead><tbody>${repairRows}</tbody></table>` : ''}
+    <table style="margin-top:10px;"><tbody>
+      <tr><td>Repairs &amp; maintenance</td><td class="num">${money(s.repairsTotal)}</td></tr>
+      ${li.postage?.amount? `<tr><td>Postage (${li.postage.stampCount} stamp(s))</td><td class="num">${money(li.postage.amount)}</td></tr>` : ''}
+      ${s.otherExpenses>0? `<tr><td>Other expenses</td><td class="num">${money(s.otherExpenses)}</td></tr>` : ''}
+      <tr class="report-total-row"><td>Total expenses</td><td class="num">${money(totalExpenses)}</td></tr>
+    </tbody></table>
+  </div>
+  <div class="panel">
+    <h3>Net</h3>
+    <table><tbody>
+      <tr><td>Reserve held back</td><td class="num">${money(s.reserveHeld)}</td></tr>
+      <tr class="report-total-row"><td>Amount disbursed</td><td class="num">${money(s.amountDisbursed)}</td></tr>
+      <tr><td>Ending trust balance, this building</td><td class="num">${money(s.endingTrustBalance)}</td></tr>
+    </tbody></table>
   </div>`;
 }
 
@@ -1377,7 +1545,6 @@ function renderStampLog(){
   const buildingOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${printState.billToBuilding===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
   const matching = unbilled.filter(s=> (!printState.billToOwner || s.ownerId===printState.billToOwner) && (!printState.billToBuilding || s.buildingId===printState.billToBuilding));
   const qty = matching.reduce((s,x)=>s+Number(x.quantity),0);
-  const total = qty * Number(printState.stampRate||0);
 
   const allRows = DATA.stampLog.slice(0,50).map(s=>`<tr>
     <td>${fmtDate(s.date)}</td>
@@ -1395,26 +1562,15 @@ function renderStampLog(){
   return `
   <div class="panel">
     <h3>Stamps</h3>
-    <div class="page-sub" style="margin:-6px 0 14px;">Every envelope and letter you print logs a stamp here. Bill unbilled usage to an owner as a management-fee-style charge.</div>
+    <div class="page-sub" style="margin:-6px 0 14px;">Every envelope and letter you print logs a stamp here. Unbilled usage rolls into that owner's next generated statement (Reports → Owner Statements) instead of being billed separately here — one invoice per owner per month.</div>
     <div class="row" style="align-items:flex-end;margin-bottom:14px;">
       <div class="field"><label>Owner</label><select onchange="printState.billToOwner=this.value;render();"><option value="">— any —</option>${ownerOpts}</select></div>
       <div class="field"><label>Building (optional)</label><select onchange="printState.billToBuilding=this.value;render();"><option value="">— any —</option>${buildingOpts}</select></div>
-      <div class="field" style="max-width:120px;"><label>$ / stamp</label><input type="number" step="0.01" value="${printState.stampRate}" oninput="printState.stampRate=Number(this.value)"></div>
-      <button class="btn" ${(!printState.billToOwner||qty===0)?'disabled':''} onclick="billStampsToOwner()">Bill ${qty} stamp(s) — ${money(total)}</button>
+      <div class="kpi" style="margin:0;"><div class="kpi-label">Unbilled, this filter</div><div class="kpi-value">${qty} stamp(s)</div></div>
       <button class="btn btn-ghost" onclick="openModal('stampLog','add')">+ Log Stamps</button>
     </div>
     ${allRows? `<table><thead><tr><th>Date</th><th>Purpose</th><th>Building</th><th>Owner</th><th class="num">Qty</th><th>Status</th><th></th></tr></thead><tbody>${allRows}</tbody></table>` : `<div class="empty">No stamp usage logged yet.</div>`}
   </div>`;
-}
-
-async function billStampsToOwner(){
-  const unbilled = DATA.stampLog.filter(s=>!s.billed && (!printState.billToOwner||s.ownerId===printState.billToOwner) && (!printState.billToBuilding||s.buildingId===printState.billToBuilding));
-  const ids = unbilled.map(s=>s.id);
-  if(!ids.length || !printState.billToOwner) return;
-  try{
-    const r = await apiCall('billStamps', {ids, ownerId: printState.billToOwner, buildingId: printState.billToBuilding||null, rate: printState.stampRate});
-    if(r.ok){ await refreshData(); alertMsg(r.message||'Billed.'); } else { alertMsg(r.message||'Could not bill stamps.'); }
-  }catch(e){ alertMsg('Could not bill stamps: '+e.message); }
 }
 
 async function printEnvelope(){
@@ -1619,7 +1775,7 @@ function openModal(type, mode, id, extra){
   modal = {type, mode, id};
   switch(type){
     case 'building':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(getBuilding(id))) : {id:null, name:'', address:'', feeType:'percent', feeValue:8, owners:[], roofLastServiced:'', roofNotes:'', electricalLoad:'', exteriorPaintColor:'', profileNotes:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getBuilding(id))) : {id:null, name:'', address:'', feeType:'percent', feeValue:8, owners:[], roofLastServiced:'', roofNotes:'', electricalLoad:'', exteriorPaintColor:'', profileNotes:'', reserveAmount:0, maintenanceApprovalThreshold:''};
       break;
     case 'unit':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getUnit(id))) : {id:null, buildingId: extra||'', number:'', beds:1, baths:1, sqft:'', notes:'', wallColor:'', faceplateColor:''};
@@ -1652,16 +1808,13 @@ function openModal(type, mode, id, extra){
       draft = mode==='edit' ? JSON.parse(JSON.stringify(getLease(id))) : {id:null, unitId:'', tenantId:'', startDate: todayISO(), endDate:'', rentAmount:0, depositAmount:0, billingDay:1, status:'active'};
       break;
     case 'maintenance':
-      draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.maintenance.find(m=>m.id===id))) : {id:null, buildingId:'', unitId:'', title:'', description:'', priority:'medium', status:'open', dateReported: todayISO(), dateCompleted:'', cost:0, notes:''};
+      draft = mode==='edit' ? JSON.parse(JSON.stringify(getMaintenance(id))) : {id:null, buildingId:'', unitId:'', title:'', description:'', priority:'medium', status:'open', dateReported: todayISO(), dateCompleted:'', cost:0, notes:'', vendorId:'', invoiceNumber:'', invoiceDate:''};
       break;
     case 'ledgerCharge':
       draft = {id:null, leaseId: extra, date: todayISO(), type:'charge', category:'rent', amount:0, memo:''};
       break;
     case 'ledgerPayment':
-      draft = {id:null, leaseId: extra, date: todayISO(), type:'payment', category:'rent', amount:0, memo:''};
-      break;
-    case 'ownerLedger':
-      draft = {id:null, ownerId:'', buildingId:'', date: todayISO(), type:'charge', amount:0, memo:''};
+      draft = {id:null, leaseId: extra, date: todayISO(), type:'payment', category:'rent', amount:0, memo:'', paymentMethod:'', chargeId:''};
       break;
     case 'communication':
       draft = mode==='edit' ? JSON.parse(JSON.stringify(DATA.communications.find(c=>c.id===id))) : {id:null, ownerId: extra||'', buildingId:'', date: todayISO(), method:'call', subject:'', notes:'', followUpDate:''};
@@ -1693,6 +1846,9 @@ function updateOwnerRow(idx, field, value){ draft.owners[idx][field] = field==='
 
 async function saveModal(){
   const t = modal.type;
+  if(t==='depositTx'){ return saveDepositTx(); }
+  if(t==='trustAdjustment'){ return saveTrustAdjustment(); }
+  if(t==='ownerTransfer'){ return saveOwnerTransfer(); }
   if(t==='changePassword'){
     if(draft.new !== draft.confirm){ alertMsg('New password and confirmation don\'t match.'); return; }
     try{
@@ -1740,7 +1896,6 @@ function renderModal(){
     case 'maintenance': title = modal.mode==='add'?'Add Maintenance Request':'Edit Maintenance Request'; body = maintenanceForm(); break;
     case 'ledgerCharge': title = 'Add Charge'; body = ledgerEntryForm(); break;
     case 'ledgerPayment': title = 'Record Payment'; body = ledgerEntryForm(); break;
-    case 'ownerLedger': title = 'Owner Billing Entry'; body = ownerLedgerForm(); break;
     case 'communication': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = communicationForm(); break;
     case 'tenantComm': title = modal.mode==='add'?'Log Communication':'Edit Communication'; body = tenantCommForm(); break;
     case 'appliance': title = modal.mode==='add'?'Add Appliance':'Edit Appliance'; body = applianceForm(); break;
@@ -1750,6 +1905,9 @@ function renderModal(){
     case 'stampLog': title = modal.mode==='add'?'Log Stamp Usage':'Edit Stamp Usage'; body = stampLogForm(); break;
     case 'user': title = modal.mode==='add'?'Add User':'Edit User'; body = userForm(); break;
     case 'changePassword': title = 'Change Password'; body = changePasswordForm(); break;
+    case 'depositTx': title = 'Refund / Deduct Security Deposit'; body = depositTxForm(); break;
+    case 'trustAdjustment': title = 'Manual Trust Entry'; body = trustAdjustmentForm(); break;
+    case 'ownerTransfer': title = 'Transfer Ownership'; body = ownerTransferForm(); break;
   }
   const forced = forcedPasswordChange && modal.type==='changePassword';
   return `<div class="modal-overlay" ${forced?'':'onclick="if(event.target===this)closeModal()"'}>
@@ -1780,6 +1938,10 @@ function buildingForm(){
       </select>
     </div>
     <div class="field"><label>Fee value</label><input type="number" step="0.01" value="${draft.feeValue}" oninput="updateDraftNum('feeValue',this.value)"></div>
+  </div>
+  <div class="field-row">
+    <div class="field"><label>Reserve (min. trust balance held back)</label><input type="number" step="0.01" value="${draft.reserveAmount||0}" oninput="updateDraftNum('reserveAmount',this.value)"></div>
+    <div class="field"><label>Repair approval threshold (optional)</label><input type="number" step="0.01" placeholder="blank = no owner approval required" value="${draft.maintenanceApprovalThreshold==null?'':draft.maintenanceApprovalThreshold}" oninput="updateDraft('maintenanceApprovalThreshold',this.value===''?'':Number(this.value))"></div>
   </div>
   <div class="field">
     <label>Owners &amp; ownership %</label>
@@ -1964,13 +2126,35 @@ function maintenanceForm(){
     <div class="field"><label>Date completed</label><input type="date" value="${draft.dateCompleted||''}" oninput="updateDraft('dateCompleted',this.value)"></div>
     <div class="field"><label>Cost</label><input type="number" step="0.01" value="${draft.cost}" oninput="updateDraftNum('cost',this.value)"></div>
   </div>
+  <div class="section-divider">Vendor &amp; invoice</div>
+  <div class="field-row">
+    <div class="field"><label>Vendor</label><select onchange="updateDraft('vendorId',this.value)"><option value="">— none —</option>${DATA.vendors.map(v=>`<option value="${v.id}" ${draft.vendorId===v.id?'selected':''}>${esc(v.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>Invoice #</label><input value="${esc(draft.invoiceNumber||'')}" oninput="updateDraft('invoiceNumber',this.value)"></div>
+    <div class="field"><label>Invoice date</label><input type="date" value="${draft.invoiceDate||''}" oninput="updateDraft('invoiceDate',this.value)"></div>
+  </div>
+  ${draft.buildingId && getBuilding(draft.buildingId)?.maintenanceApprovalThreshold!=null ? `<div class="subtle">This building requires owner approval above ${money(getBuilding(draft.buildingId).maintenanceApprovalThreshold)}. ${draft.approvalStatus?'Current status: '+approvalStatusLabel(draft.approvalStatus)+'.':''}</div>` : ''}
   <div class="field"><label>Notes</label><textarea oninput="updateDraft('notes',this.value)">${esc(draft.notes||'')}</textarea></div>`;
 }
 function reRenderModalBody(){ render(); }
+function approvalStatusLabel(s){
+  return {auto_approved:'Auto-approved', pending:'Pending owner approval', approved:'Approved', denied:'Denied'}[s]||s;
+}
+function approvalStatusTag(s){
+  const map = {auto_approved:'tag-good', pending:'tag-warn', approved:'tag-good', denied:'tag-bad'};
+  return `<span class="tag ${map[s]||'tag-neutral'}">${esc(approvalStatusLabel(s))}</span>`;
+}
+async function decideMaintenanceApproval(id, decision){
+  try{
+    const result = await apiCall('approveMaintenance', {id, decision});
+    if(result.ok){ await refreshData(); }
+    alertMsg(result.message || 'Done.');
+  }catch(e){ alertMsg('Could not record decision: '+e.message); }
+}
 
 function ledgerEntryForm(){
   const lease = getLease(draft.leaseId);
   const isCharge = draft.type==='charge';
+  const openCharges = !isCharge ? leaseLedgerEntries(draft.leaseId).filter(e=>e.type==='charge') : [];
   return `
   <div class="modal-sub">${esc(getTenant(lease?.tenantId)?.name||'')} — ${esc(unitLabel(lease?.unitId))}</div>
   <div class="field-row">
@@ -1979,31 +2163,26 @@ function ledgerEntryForm(){
   </div>
   <div class="field"><label>Category</label>
     <select onchange="updateDraft('category',this.value)">
-      ${(isCharge? ['rent','late_fee','utility','other'] : ['rent','deposit','other']).map(c=>`<option value="${c}" ${draft.category===c?'selected':''}>${c}</option>`).join('')}
+      ${(isCharge? ['rent','late_fee','utility','other'] : ['rent','late_fee','utility','deposit','other']).map(c=>`<option value="${c}" ${draft.category===c?'selected':''}>${c}</option>`).join('')}
     </select>
   </div>
+  ${!isCharge? `
+  <div class="field-row">
+    <div class="field"><label>Payment method</label>
+      <select onchange="updateDraft('paymentMethod',this.value)">
+        <option value="">— unspecified —</option>
+        ${['cash','check','ach','card','online','other'].map(m=>`<option value="${m}" ${draft.paymentMethod===m?'selected':''}>${m}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>Applies to charge (optional)</label>
+      <select onchange="updateDraft('chargeId',this.value)">
+        <option value="">— none —</option>
+        ${openCharges.map(c=>`<option value="${c.id}" ${draft.chargeId===c.id?'selected':''}>${fmtDate(c.date)} — ${c.category} — ${money(c.amount)}</option>`).join('')}
+      </select>
+    </div>
+  </div>
+  ${draft.category==='deposit'? '<div class="subtle">Recorded to the segregated security-deposit ledger, not the operating trust balance.</div>' : ''}` : ''}
   <div class="field"><label>Memo</label><input value="${esc(draft.memo)}" oninput="updateDraft('memo',this.value)" placeholder="Optional note"></div>`;
-}
-
-function ownerLedgerForm(){
-  const oOpts = DATA.owners.map(o=>`<option value="${o.id}" ${draft.ownerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('');
-  const bOpts = DATA.buildings.map(b=>`<option value="${b.id}" ${draft.buildingId===b.id?'selected':''}>${esc(b.name)}</option>`).join('');
-  return `
-  <div class="field-row">
-    <div class="field"><label>Owner</label><select onchange="updateDraft('ownerId',this.value)"><option value="">— select —</option>${oOpts}</select></div>
-    <div class="field"><label>Building</label><select onchange="updateDraft('buildingId',this.value)"><option value="">— select —</option>${bOpts}</select></div>
-  </div>
-  <div class="field-row">
-    <div class="field"><label>Date</label><input type="date" value="${draft.date}" oninput="updateDraft('date',this.value)"></div>
-    <div class="field"><label>Amount</label><input type="number" step="0.01" value="${draft.amount}" oninput="updateDraftNum('amount',this.value)"></div>
-  </div>
-  <div class="field"><label>Type</label>
-    <select onchange="updateDraft('type',this.value)">
-      <option value="charge" ${draft.type==='charge'?'selected':''}>Fee charged to owner</option>
-      <option value="payment" ${draft.type==='payment'?'selected':''}>Payment received from owner</option>
-    </select>
-  </div>
-  <div class="field"><label>Memo</label><input value="${esc(draft.memo)}" oninput="updateDraft('memo',this.value)"></div>`;
 }
 
 function communicationForm(){
@@ -2107,7 +2286,8 @@ function renderConfirm(){
 const DELETE_ENTITY_MAP = {
   deleteBuilding:'building', deleteUnit:'unit', deleteOwner:'owner', deleteTenant:'tenant', deleteVendor:'vendor',
   deleteLease:'lease', deleteLedgerEntry:'ledgerEntry', deleteMaintenance:'maintenance',
-  deleteOwnerLedgerEntry:'ownerLedger', deleteCommunication:'communication', deleteTenantComm:'tenantComm',
+  deleteTrustTransaction:'trustTransaction', deleteOwnerStatement:'ownerStatement',
+  deleteCommunication:'communication', deleteTenantComm:'tenantComm',
   deleteAppliance:'appliance', deleteTimeEntry:'timeEntry',
   deleteRoom:'room', deleteRoomOpening:'roomOpening', deleteStampLog:'stampLog'
 };

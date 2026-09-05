@@ -21,7 +21,9 @@ CREATE TABLE buildings (
   roof_notes TEXT NULL,
   electrical_load VARCHAR(100) NULL,      -- e.g. "200A 3-phase"
   exterior_paint_color VARCHAR(150) NULL, -- brand + code, e.g. "SW 7006 Extra White"
-  profile_notes TEXT NULL
+  profile_notes TEXT NULL,
+  reserve_amount DECIMAL(10,2) NOT NULL DEFAULT 0,          -- minimum trust balance to hold back each statement cycle
+  maintenance_approval_threshold DECIMAL(10,2) NULL         -- repairs at/under this $ amount are auto-approved; NULL = no gate configured
 ) ENGINE=InnoDB;
 
 CREATE TABLE building_owners (
@@ -119,7 +121,10 @@ CREATE TABLE ledger (
   category VARCHAR(50) NOT NULL DEFAULT 'rent',
   amount DECIMAL(10,2) NOT NULL DEFAULT 0,
   memo VARCHAR(255),
-  FOREIGN KEY (lease_id) REFERENCES leases(id) ON DELETE CASCADE
+  payment_method ENUM('cash','check','ach','card','online','other') NULL,
+  charge_id INT NULL,  -- for a payment row, the charge it satisfies (optional)
+  FOREIGN KEY (lease_id) REFERENCES leases(id) ON DELETE CASCADE,
+  FOREIGN KEY (charge_id) REFERENCES ledger(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 CREATE TABLE maintenance (
@@ -134,21 +139,126 @@ CREATE TABLE maintenance (
   date_completed DATE NULL,
   cost DECIMAL(10,2) DEFAULT 0,
   notes TEXT,
+  vendor_id INT NULL,
+  invoice_number VARCHAR(100) NULL,
+  invoice_date DATE NULL,
+  approval_status ENUM('auto_approved','pending','approved','denied') NOT NULL DEFAULT 'auto_approved',
+  approved_by INT NULL,  -- FK to users(id) added below, once users exists
+  approved_at DATETIME NULL,
   FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE SET NULL,
-  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE SET NULL
+  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE SET NULL,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
-CREATE TABLE owner_ledger (
+-- Owner's cash trust balance per building, independent of the pooled bank
+-- balance — proves each owner's share of pooled trust funds without
+-- commingling. Security deposits are deliberately excluded (see
+-- security_deposits below); running_balance is recomputed by the app on
+-- every write for that owner+building pair, in date/id order.
+CREATE TABLE trust_transactions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   owner_id INT NOT NULL,
   building_id INT NOT NULL,
+  type ENUM('income','fee','expense','disbursement','transfer_in','transfer_out','adjustment') NOT NULL,
+  category VARCHAR(50) NOT NULL DEFAULT 'other',
   date DATE NOT NULL,
-  type ENUM('charge','payment') NOT NULL,
   amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  running_balance DECIMAL(10,2) NOT NULL DEFAULT 0,
   memo VARCHAR(255),
+  related_ledger_id INT NULL,
+  related_maintenance_id INT NULL,
+  related_transfer_id INT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE,
+  FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+  FOREIGN KEY (related_ledger_id) REFERENCES ledger(id) ON DELETE CASCADE,
+  FOREIGN KEY (related_maintenance_id) REFERENCES maintenance(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Security-deposit sub-ledger: tied to unit + tenant + lease, never mixed
+-- into trust_transactions. Keyed to building_id (not owner_id) so a
+-- deposit stays attached to the building — and therefore automatically
+-- survives a sale — without a transfer step; see owner_transfers.
+CREATE TABLE security_deposits (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  lease_id INT NOT NULL,
+  unit_id INT NOT NULL,
+  tenant_id INT NOT NULL,
+  building_id INT NOT NULL,
+  amount_held DECIMAL(10,2) NOT NULL DEFAULT 0,
+  date_received DATE NOT NULL,
+  status ENUM('held','partially_refunded','refunded','applied') NOT NULL DEFAULT 'held',
+  notes TEXT,
+  FOREIGN KEY (lease_id) REFERENCES leases(id) ON DELETE CASCADE,
+  FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
   FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+CREATE TABLE security_deposit_transactions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  security_deposit_id INT NOT NULL,
+  date DATE NOT NULL,
+  type ENUM('receipt','refund','deduction') NOT NULL,
+  amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  memo VARCHAR(255),
+  related_ledger_id INT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (security_deposit_id) REFERENCES security_deposits(id) ON DELETE CASCADE,
+  FOREIGN KEY (related_ledger_id) REFERENCES ledger(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- A frozen snapshot per owner/building/period, not a live recomputation —
+-- reopening a statement later shows exactly what was generated (and
+-- disbursed) at the time, even if ledger entries are edited afterward.
+CREATE TABLE owner_statements (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  owner_id INT NOT NULL,
+  building_id INT NOT NULL,
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  rent_due DECIMAL(10,2) NOT NULL DEFAULT 0,
+  rent_collected DECIMAL(10,2) NOT NULL DEFAULT 0,
+  late_fees_collected DECIMAL(10,2) NOT NULL DEFAULT 0,
+  other_income DECIMAL(10,2) NOT NULL DEFAULT 0,
+  management_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  repairs_total DECIMAL(10,2) NOT NULL DEFAULT 0,
+  other_expenses DECIMAL(10,2) NOT NULL DEFAULT 0,
+  reserve_held DECIMAL(10,2) NOT NULL DEFAULT 0,
+  amount_disbursed DECIMAL(10,2) NOT NULL DEFAULT 0,
+  ending_trust_balance DECIMAL(10,2) NOT NULL DEFAULT 0,
+  line_items JSON NOT NULL,
+  generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  generated_by INT NULL,  -- FK to users(id) added below, once users exists
+  FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE,
+  FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+  UNIQUE KEY uniq_owner_building_period (owner_id, building_id, period_start, period_end)
+) ENGINE=InnoDB;
+
+-- Audit trail for a building sale: how much trust cash and how many/much
+-- in security deposits were on record at the moment ownership moved.
+-- Deposits themselves don't move (they're already keyed to building_id) —
+-- this is the disclosure record proving what the incoming owner assumed.
+CREATE TABLE owner_transfers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  building_id INT NOT NULL,
+  from_owner_id INT NOT NULL,
+  to_owner_id INT NOT NULL,
+  transfer_date DATE NOT NULL,
+  ownership_pct DECIMAL(5,2) NOT NULL DEFAULT 0,
+  trust_balance_transferred DECIMAL(10,2) NOT NULL DEFAULT 0,
+  deposits_transferred_count INT NOT NULL DEFAULT 0,
+  deposits_transferred_total DECIMAL(10,2) NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by INT NULL,  -- FK to users(id) added below, once users exists
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (building_id) REFERENCES buildings(id) ON DELETE CASCADE,
+  FOREIGN KEY (from_owner_id) REFERENCES owners(id) ON DELETE CASCADE,
+  FOREIGN KEY (to_owner_id) REFERENCES owners(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+ALTER TABLE trust_transactions
+  ADD FOREIGN KEY (related_transfer_id) REFERENCES owner_transfers(id) ON DELETE SET NULL;
 
 CREATE TABLE communications (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -191,6 +301,12 @@ CREATE TABLE users (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+-- Deferred FKs to users(id), from tables created earlier in this file
+-- (before `users` existed to reference).
+ALTER TABLE maintenance ADD FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE owner_statements ADD FOREIGN KEY (generated_by) REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE owner_transfers ADD FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE TABLE time_entries (
   id INT AUTO_INCREMENT PRIMARY KEY,

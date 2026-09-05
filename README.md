@@ -1,15 +1,19 @@
 # Ledgerstone — cPanel setup
 
 A property management app: buildings, units, owners, tenants, leases, a
-tenant ledger with aging, maintenance tracking, owner billing, a
-communications log, building/unit profiles with a per-unit appliance list,
-and a staff timecard tool for tracking labor by activity and building/unit.
+tenant ledger with aging, maintenance tracking with vendor/invoice/approval
+workflow, trust accounting (a per-owner/building trust balance segregated
+from tenant security deposits, generated monthly owner statements, and
+ownership-transfer audit trail), a communications log, building/unit
+profiles with a per-unit appliance list, and a staff timecard tool for
+tracking labor by activity and building/unit.
 Two account types: **staff** (full access) and **owner** (read-only,
 scoped to the buildings they own).
 
-Stack: PHP + MySQL. No Node, no build step, no Composer dependencies —
-this is intentionally the simplest thing that works on ordinary shared
-cPanel hosting.
+Stack: PHP + MySQL. No Node, no build step, and no Composer dependencies
+except dompdf (used only for PDF statement export — see "PDF statements"
+below) — this is intentionally close to the simplest thing that works on
+ordinary shared cPanel hosting.
 
 ## 1. Create the database
 
@@ -170,6 +174,72 @@ If your database predates per-room measurements, also run
 If your database predates Printables (envelope/letter mailing addresses
 and the stamp log), also run `migrations/005_printables.sql` the same way.
 
+If your database predates trust accounting (a real owner trust balance
+per building, segregated security deposits, vendor/invoice/approval
+fields on maintenance, reserve amounts, generated owner statements, and
+ownership transfers), also run `migrations/006_trust_accounting.sql` the
+same way — **export your database first**, since this one replaces the
+old `owner_ledger` table with `trust_transactions` and migrates its rows.
+See the comments at the top of that file for what it changes and what to
+double-check afterward.
+
+## Trust accounting
+
+- **Trust ledger** (Trust & Deposits tab) — each owner's share of pooled
+  rent cash, per building, kept separate from the bank account itself so
+  you can always prove what belongs to which owner. It fills in
+  automatically: a tenant rent/late-fee/utility/other payment posts
+  income split by ownership %, a completed repair posts an expense the
+  same way, and generating a monthly statement (see below) posts the
+  management fee, any unbilled postage, and a disbursement. The only
+  manual entries are a fee, a disbursement, or a flagged adjustment —
+  income and expense postings always follow their ledger/maintenance
+  record so they can't drift out of sync with it.
+- **Security deposits** — segregated from the trust ledger entirely, tied
+  to unit + tenant + lease. Record one by adding a payment on a tenant's
+  ledger with category "deposit" — it never touches the operating trust
+  balance. Refund or deduct from it under Trust & Deposits. Deposits are
+  keyed to the building, not the owner, so they automatically stay
+  attached to a building through an ownership transfer with no separate
+  step.
+- **One statement per owner per month** — Reports → Owner Statements.
+  Generating a statement rolls the management fee, any postage billed
+  since the last cycle, and the period's itemized repairs into a single
+  invoice, then discloses whatever's disbursed above the building's
+  reserve (set per building on its edit form, alongside the repair
+  approval threshold). A statement is a frozen snapshot — reopening one
+  later shows exactly what was generated and disbursed at the time.
+  Export any statement as PDF from its row, or from its detail view.
+- **Maintenance approval** — set a building's repair approval threshold
+  and any request over it needs a decision before its cost posts to the
+  trust ledger. An owner login, otherwise entirely read-only, gets
+  exactly one narrow write action here: approve or deny a pending request
+  on a building they own.
+- **Ownership transfers** — Properties → a building's "Transfer
+  Ownership" button. Records the trust balance and security deposits on
+  file at the moment of transfer as an audit trail, moves the trust
+  balance to the incoming owner, and updates `building_owners` — deposits
+  need no separate handling since they're already tied to the building.
+
+### PDF statements (Composer / dompdf)
+
+Owner statement PDFs use [dompdf](https://github.com/dompdf/dompdf), this
+app's one Composer dependency — added deliberately, not by default, since
+everything else here is plain PHP with no build step. Set it up once:
+
+1. If your host offers cPanel's **Setup Node.js/PHP App** page with a
+   Composer button, use that, pointed at this app's folder. Otherwise SSH
+   in and run `composer install` in this folder.
+2. That creates a `vendor/` folder. Either let it live on the server (if
+   you used the Composer button or SSH, it's already there), or run
+   `composer install` locally and commit/upload the `vendor/` folder
+   alongside everything else — this repo doesn't run a build step on
+   deploy, so `vendor/` has to already exist where `owner_statement_pdf.php`
+   can find it.
+3. Until then, PDF export shows a plain explanation instead of a fatal
+   error, and a statement's **Print** view (browser "Save as PDF") still
+   works as a fallback.
+
 ## Building/unit profiles, appliances, and timecards
 
 - **Properties** → a building's edit form now has roof/electrical/exterior
@@ -189,13 +259,11 @@ and the stamp log), also run `migrations/005_printables.sql` the same way.
   rate captured on the entry itself. A default rate can be set per staff
   login in **Users**. The tab includes a profitability snapshot — rent
   collected vs. labor cost for a building over a date range.
-- **Reports → Owner statement** is now a full monthly-statement view per
-  building: occupied/vacant units, income, outstanding arrears, open
-  maintenance count, repairs completed in the period (with cost), the
-  projected annual rent roll, and net to owner after the management fee.
-  Run it monthly and use **Print** (or your browser's "Save as PDF") to
-  send it to the owner — there's no automated email sender built in yet,
-  since this app has no mail server configuration.
+- **Reports → Owner Statements** generates one frozen statement per owner
+  per building per month — see "Trust accounting" below for the full
+  picture (income, itemized repairs, management fee, reserve, and
+  disbursement) and how to export it as a PDF. There's no automated email
+  sender built in yet, since this app has no mail server configuration.
 - **Printables** (staff only) prints envelopes and form letters. Pick a
   "From" (a building or an owner) and a "To" (a tenant, vendor, owner, or
   custom entry) and it pulls the mailing address from that record —
